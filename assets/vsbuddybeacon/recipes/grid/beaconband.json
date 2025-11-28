@@ -1,0 +1,12 @@
+[
+	{
+		"ingredientPattern": " G ,GRG, G ",
+		"ingredients": {
+			"G": { "type": "item", "code": "game:ingot-gold" },
+			"R": { "type": "item", "code": "game:gear-rusty" }
+		},
+		"width": 3,
+		"height": 3,
+		"output": { "type": "item", "code": "vsbuddybeacon:beaconband" }
+	}
+]

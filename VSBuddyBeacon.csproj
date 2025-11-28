@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>12</LangVersion>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <OutputType>Library</OutputType>
+    <RootNamespace>VSBuddyBeacon</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="VintagestoryAPI">
+      <HintPath>I:\Games\Vintagestory\VintagestoryAPI.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VintagestoryLib">
+      <HintPath>I:\Games\Vintagestory\VintagestoryLib.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSSurvivalMod">
+      <HintPath>I:\Games\Vintagestory\Mods\VSSurvivalMod.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VSEssentials">
+      <HintPath>I:\Games\Vintagestory\Mods\VSEssentials.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="protobuf-net">
+      <HintPath>I:\Games\Vintagestory\Lib\protobuf-net.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="cairo-sharp">
+      <HintPath>I:\Games\Vintagestory\Lib\cairo-sharp.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Auto-deploy to VintageStoryData\Mods as zip file -->
+  <Target Name="PackageAndDeploy" AfterTargets="Build">
+    <PropertyGroup>
+      <ModPackDir>$(OutputPath)ModPackage</ModPackDir>
+      <ModsFolder>$(AppData)\VintageStoryData\Mods</ModsFolder>
+      <ZipFile>$(ModsFolder)\VSBuddyBeacon.zip</ZipFile>
+    </PropertyGroup>
+
+    <!-- Clean and create temp package directory -->
+    <RemoveDir Directories="$(ModPackDir)" />
+    <MakeDir Directories="$(ModPackDir)" />
+
+    <!-- Copy files to package directory -->
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ModPackDir)" />
+    <Copy SourceFiles="$(ProjectDir)modinfo.json" DestinationFolder="$(ModPackDir)" />
+    <Exec Command="xcopy &quot;$(ProjectDir)assets&quot; &quot;$(ModPackDir)\assets&quot; /E /I /Y /Q" />
+
+    <!-- Create zip file -->
+    <Delete Files="$(ZipFile)" Condition="Exists('$(ZipFile)')" />
+    <ZipDirectory SourceDirectory="$(ModPackDir)" DestinationFile="$(ZipFile)" Overwrite="true" />
+
+    <Message Importance="high" Text="VS Buddy Beacon packaged to: $(ZipFile)" />
+  </Target>
+</Project>

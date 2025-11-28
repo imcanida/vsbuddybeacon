@@ -1,0 +1,28 @@
+# Build results
+bin/
+obj/
+*.dll
+*.pdb
+*.cache
+
+# VS/Rider/Visual Studio Code
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Temporary decompile files
+temp_decompile/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Package files
+*.zip
+
+# User-specific files
+*.csproj.user

@@ -1,0 +1,13 @@
+{
+	"item-wayfindercompass": "Wayfinder's Compass",
+	"item-heroscallstone": "Hero's Call Stone",
+	"item-beaconband": "Beacon Band",
+
+	"itemdesc-wayfindercompass": "A mystical compass that can guide you to a friend. Right-click to select a player and teleport to them (with their consent). Consumed on use.",
+	"itemdesc-heroscallstone": "A glowing stone imbued with summoning magic. Right-click to select a player and summon them to your location (with their consent). Consumed on use.",
+	"itemdesc-beaconband": "A silver band that links you with allies. Right-click to set a beacon code. Players with matching codes can see each other's direction and distance on a compass HUD. Works while worn as a bracer or kept in your inventory.",
+
+	"vsbuddybeacon:heldhelp-wayfindercompass": "Teleport to player",
+	"vsbuddybeacon:heldhelp-heroscallstone": "Summon player",
+	"vsbuddybeacon:heldhelp-beaconband": "Set beacon code"
+}

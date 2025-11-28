@@ -1,0 +1,11 @@
+{
+  "type": "code",
+  "modid": "vsbuddybeacon",
+  "name": "VS Buddy Beacon",
+  "authors": ["VSBuddyBeacon Team"],
+  "description": "Player-to-player teleportation system. Teleport to friends or summon them to you - with consent and a cost!",
+  "version": "1.0.0",
+  "dependencies": {
+    "game": "1.19.0"
+  }
+}

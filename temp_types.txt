@@ -1,0 +1,19 @@
+Unhandled exception. McMaster.Extensions.CommandLineUtils.CommandParsingException: Invalid value specified for languageversion. Allowed values are: CSharp1, CSharp2, CSharp3, CSharp4, CSharp5, CSharp6, CSharp7, CSharp7_1, CSharp7_2, CSharp7_3, CSharp8_0, CSharp9_0, CSharp10_0, CSharp11_0, Preview, CSharp12_0, Latest.
+ ---> System.FormatException: Invalid value specified for languageversion. Allowed values are: CSharp1, CSharp2, CSharp3, CSharp4, CSharp5, CSharp6, CSharp7, CSharp7_1, CSharp7_2, CSharp7_3, CSharp8_0, CSharp9_0, CSharp10_0, CSharp11_0, Preview, CSharp12_0, Latest.
+   at McMaster.Extensions.CommandLineUtils.Abstractions.EnumParser.<>c__DisplayClass0_0.<Create>b__0(String argName, String value, CultureInfo culture)
+   at McMaster.Extensions.CommandLineUtils.Abstractions.ValueParser.DelegatingValueParser`1.Parse(String argName, String value, CultureInfo culture)
+   at McMaster.Extensions.CommandLineUtils.Abstractions.ValueParser.DelegatingValueParser.Parse(String argName, String value, CultureInfo culture)
+   at McMaster.Extensions.CommandLineUtils.Abstractions.ValueParserProvider.GenericParserAdapter`1.McMaster.Extensions.CommandLineUtils.Abstractions.IValueParser.Parse(String argName, String value, CultureInfo culture)
+   at McMaster.Extensions.CommandLineUtils.Conventions.OptionAttributeConventionBase`1.<>c__DisplayClass0_0.<AddOption>b__1(ParseResult _)
+   at McMaster.Extensions.CommandLineUtils.CommandLineApplication.HandleParseResult(ParseResult parseResult)
+   --- End of inner exception stack trace ---
+   at McMaster.Extensions.CommandLineUtils.CommandLineApplication.HandleParseResult(ParseResult parseResult)
+   at McMaster.Extensions.CommandLineUtils.CommandLineApplication.Parse(String[] args)
+   at McMaster.Extensions.CommandLineUtils.CommandLineApplication.ExecuteAsync(String[] args, CancellationToken cancellationToken)
+   at McMaster.Extensions.Hosting.CommandLine.Internal.CommandLineService`1.RunAsync(CancellationToken cancellationToken)
+   at McMaster.Extensions.Hosting.CommandLine.Internal.CommandLineLifetime.<>c__DisplayClass10_0.<<WaitForStartAsync>b__0>d.MoveNext()
+--- End of stack trace from previous location ---
+   at Microsoft.Extensions.Hosting.HostExtensions.RunCommandLineApplicationAsync(IHost host, CancellationToken cancellationToken)
+   at Microsoft.Extensions.Hosting.HostBuilderExtensions.RunCommandLineApplicationAsync[TApp](IHostBuilder hostBuilder, String[] args, Action`1 configure, CancellationToken cancellationToken)
+   at Microsoft.Extensions.Hosting.HostBuilderExtensions.RunCommandLineApplicationAsync[TApp](IHostBuilder hostBuilder, String[] args, CancellationToken cancellationToken)
+   at ICSharpCode.ILSpyCmd.ILSpyCmdProgram.<Main>(String[] args)

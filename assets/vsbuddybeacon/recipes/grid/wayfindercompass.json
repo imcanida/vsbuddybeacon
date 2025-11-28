@@ -1,0 +1,15 @@
+[
+	{
+		"ingredientPattern": "GCG,ITI,GRG",
+		"ingredients": {
+			"G": { "type": "item", "code": "game:gear-rusty" },
+			"C": { "type": "item", "code": "game:compass-base" },
+			"I": { "type": "item", "code": "game:ingot-iron" },
+			"T": { "type": "item", "code": "game:gear-temporal" },
+			"R": { "type": "item", "code": "game:resonancearchive-1" }
+		},
+		"width": 3,
+		"height": 3,
+		"output": { "type": "item", "code": "vsbuddybeacon:wayfindercompass" }
+	}
+]

@@ -1,0 +1,48 @@
+{
+	"code": "heroscallstone",
+	"class": "ItemHerosCallStone",
+	"maxstacksize": 1,
+	"heldTpUseAnimation": "interactstatic",
+	"creativeinventory": {
+		"general": ["*"],
+		"items": ["*"]
+	},
+	"shape": { "base": "game:item/jonas/returnbase" },
+	"textures": {
+		"plain": { "base": "game:block/leather/plain" },
+		"patternscrolls": { "base": "game:block/machine/patternscrolls" },
+		"rustyglow": { "base": "game:block/machine/statictranslocator/rustyglow" },
+		"gold": { "base": "game:block/metal/sheet-plain/gold1" },
+		"cupronickel1": { "base": "game:block/metal/sheet/cupronickel1" },
+		"lead": { "base": "game:block/metal/sheet-plain/lead1" }
+	},
+	"attributes": {
+		"displaycaseable": true,
+		"shelvable": true,
+		"handbook": {
+			"groupBy": ["heroscallstone"]
+		}
+	},
+	"lightHsv": [15, 5, 8],
+	"materialDensity": 3000,
+	"fpHandTransform": {
+		"translation": { "x": -0.25, "y": 0.27, "z": 0.8 },
+		"rotation": { "x": 8, "y": 49, "z": 0 }
+	},
+	"tpHandTransform": {
+		"translation": { "x": -0.77, "y": -0.46, "z": -0.72 },
+		"rotation": { "x": -2, "y": 12, "z": -9 },
+		"scale": 0.72
+	},
+	"guiTransform": {
+		"rotation": { "x": -22.6, "y": -45.3, "z": 17 },
+		"origin": { "x": 0.6, "y": 0.1, "z": 0.6 },
+		"scale": 1.84
+	},
+	"groundTransform": {
+		"translation": { "x": 0, "y": 0, "z": 0 },
+		"rotation": { "x": 0, "y": -45, "z": 0 },
+		"origin": { "x": 0.5, "y": 0, "z": 0.5 },
+		"scale": 3
+	}
+}
