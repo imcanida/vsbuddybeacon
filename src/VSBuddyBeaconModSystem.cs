@@ -381,6 +381,7 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<PlayerListResponsePacket>()
                 .RegisterMessageType<BeaconCodeSetPacket>()
                 .RegisterMessageType<BeaconPositionPacket>()
+                .RegisterMessageType<SilencePlayerPacket>()
                 .SetMessageHandler<TeleportPromptPacket>(OnTeleportPromptReceived)
                 .SetMessageHandler<TeleportResultPacket>(OnTeleportResultReceived)
                 .SetMessageHandler<PlayerListResponsePacket>(OnPlayerListReceived)
@@ -667,6 +668,9 @@ namespace VSBuddyBeacon
 
             // Track request count for this requester -> target pair
             int requestCount = IncrementRequestCount(targetPlayer.PlayerUID, fromPlayer.PlayerUID);
+            sapi.Logger.Notification($"[VSBuddyBeacon] Request count for {fromPlayer.PlayerName} -> {targetPlayer.PlayerName}: {requestCount}");
+
+            long requestTime = sapi.World.ElapsedMilliseconds;
 
             var request = new PendingTeleportRequest
             {
@@ -674,7 +678,7 @@ namespace VSBuddyBeacon
                 RequesterUid = fromPlayer.PlayerUID,
                 TargetUid = targetPlayer.PlayerUID,
                 RequestType = packet.RequestType,
-                RequestTime = sapi.World.ElapsedMilliseconds
+                RequestTime = requestTime
             };
 
             pendingRequests[request.RequestId] = request;
@@ -685,7 +689,8 @@ namespace VSBuddyBeacon
                 RequestType = packet.RequestType,
                 RequestId = request.RequestId,
                 RequestCount = requestCount,
-                RequesterUid = fromPlayer.PlayerUID
+                RequesterUid = fromPlayer.PlayerUID,
+                RequestTimestamp = requestTime
             };
 
             sapi.Network.GetChannel(ChannelName).SendPacket(prompt, targetPlayer);
@@ -851,9 +856,17 @@ namespace VSBuddyBeacon
 
                 var requester = sapi.World.AllOnlinePlayers
                     .FirstOrDefault(p => p.PlayerUID == request.RequesterUid) as IServerPlayer;
+                var target = sapi.World.AllOnlinePlayers
+                    .FirstOrDefault(p => p.PlayerUID == request.TargetUid) as IServerPlayer;
 
+                // Notify both players about the timeout
                 if (requester != null)
                     SendResult(requester, false, "Teleport request timed out.");
+
+                // Note: Target player's dialog will auto-close via client-side countdown
+                // But we can send a message as backup in case of clock sync issues
+                if (target != null)
+                    SendResult(target, false, "Teleport request expired.");
             }
         }
 
@@ -884,6 +897,7 @@ namespace VSBuddyBeacon
             {
                 counts = new Dictionary<string, int>();
                 requestCounts[targetUid] = counts;
+                sapi.Logger.Debug($"[VSBuddyBeacon] Created new request count tracker for target {targetUid}");
             }
 
             if (!counts.TryGetValue(requesterUid, out int count))
@@ -891,6 +905,7 @@ namespace VSBuddyBeacon
 
             count++;
             counts[requesterUid] = count;
+            sapi.Logger.Debug($"[VSBuddyBeacon] Incremented request count: requester={requesterUid} -> target={targetUid}, new count={count}");
             return count;
         }
 
@@ -962,7 +977,7 @@ namespace VSBuddyBeacon
                 ? $"{packet.RequesterName} wants to teleport to you."
                 : $"{packet.RequesterName} wants to summon you.";
 
-            teleportPromptDialog = new GuiDialogTeleportPrompt(capi, message, packet.RequestId, packet.RequestCount, packet.RequesterUid);
+            teleportPromptDialog = new GuiDialogTeleportPrompt(capi, message, packet.RequestId, packet.RequestCount, packet.RequesterUid, packet.RequestTimestamp);
             teleportPromptDialog.TryOpen();
         }
 

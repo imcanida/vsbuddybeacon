@@ -4,7 +4,7 @@
     "name": "VS Buddy Beacon",
     "authors": [ "Dreous" ],
     "description": "Buddy Beacon adds three multiplayer tools that make it easy to find and join your friends. Teleport to a buddy or request that they warp to you—always with their consent. Link up with Beacon Bracelets to see other players on the map who share your chosen frequency (code).",
-    "version": "0.1.0",
+    "version": "0.1.3",
     "dependencies": {
         "game": "1.19.0"
     }

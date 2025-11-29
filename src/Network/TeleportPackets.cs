@@ -54,6 +54,9 @@ namespace VSBuddyBeacon
 
         [ProtoMember(5)]
         public string RequesterUid { get; set; }  // UID of requester for silencing
+
+        [ProtoMember(6)]
+        public long RequestTimestamp { get; set; }  // When the request was created (server time in ms)
     }
 
     [ProtoContract]
