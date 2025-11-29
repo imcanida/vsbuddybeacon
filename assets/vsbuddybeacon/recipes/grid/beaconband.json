@@ -1,12 +1,13 @@
 [
 	{
-		"ingredientPattern": " G ,GRG, G ",
+		"name": "Beacon Band",
+		"ingredientPattern": "   ,STS,   ",
 		"ingredients": {
-			"G": { "type": "item", "code": "game:ingot-gold" },
-			"R": { "type": "item", "code": "game:gear-rusty" }
+			"S": { "type": "item", "code": "game:ingot-silver" },
+			"T": { "type": "item", "code": "game:gear-temporal" }
 		},
 		"width": 3,
 		"height": 3,
-		"output": { "type": "item", "code": "vsbuddybeacon:beaconband" }
+		"output": { "type": "item", "code": "vsbuddybeacon:beaconband", "quantity": 1 }
 	}
 ]

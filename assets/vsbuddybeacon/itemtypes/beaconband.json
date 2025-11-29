@@ -14,12 +14,11 @@
 	},
 	"storageFlags": 128,
 	"shape": { "base": "game:entity/humanoid/seraph/clothing/arm/silver-bracelet" },
-	"texturesByType": {
-		"*": {
-			"seraph": { "base": "game:block/transparent" }
-		}
+	"textures": {
+		"null": { "base": "game:block/transparent" },
+		"seraph": { "base": "game:block/transparent" }
 	},
-	"renderAlphaTest": 0.25,
+	"renderAlphaTest": 0.05,
 	"heldTpUseAnimation": "interactstatic",
 	"creativeinventory": {
 		"general": ["*"],

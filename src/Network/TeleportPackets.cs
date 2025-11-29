@@ -48,6 +48,12 @@ namespace VSBuddyBeacon
 
         [ProtoMember(3)]
         public long RequestId { get; set; }
+
+        [ProtoMember(4)]
+        public int RequestCount { get; set; }  // How many times this player has requested
+
+        [ProtoMember(5)]
+        public string RequesterUid { get; set; }  // UID of requester for silencing
     }
 
     [ProtoContract]
@@ -74,5 +80,12 @@ namespace VSBuddyBeacon
 
         [ProtoMember(2)]
         public string[] PlayerUids { get; set; }
+    }
+
+    [ProtoContract]
+    public class SilencePlayerPacket
+    {
+        [ProtoMember(1)]
+        public string PlayerUidToSilence { get; set; }  // The player being silenced
     }
 }

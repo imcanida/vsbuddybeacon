@@ -1,0 +1,116 @@
+{
+  "_comment": "VSBuddyBeacon Configuration Example",
+  "_location": "Place this file at: VintageStoryData/ModConfig/VSBuddyBeacon.json",
+  "_note": "All items are enabled with default recipes by default. Use this file to customize.",
+
+  "Items": {
+    "beaconband": {
+      "Enabled": true,
+      "AllowCrafting": true,
+      "GiveOnFirstJoin": true,
+      "_comment": "Default recipe: 2 Silver Ingots + 1 Temporal Gear (horizontal row)"
+
+      // Uncomment to override default recipe:
+      // "CustomRecipe": {
+      //   "IngredientPattern": "   ,STS,   ",
+      //   "Ingredients": {
+      //     "S": { "Type": "item", "Code": "game:ingot-silver", "Quantity": 1 },
+      //     "T": { "Type": "item", "Code": "game:gear-temporal", "Quantity": 1 }
+      //   },
+      //   "Width": 3,
+      //   "Height": 3,
+      //   "Output": { "Quantity": 1 }
+      // }
+    },
+
+    "wayfindercompass": {
+      "Enabled": true,
+      "AllowCrafting": true,
+      "GiveOnFirstJoin": false,
+      "_comment": "Default recipe: 5 Rusty Gears, 3 Obsidian, 1 Temporal Gear"
+
+      // Default recipe (for reference):
+      // Pattern:  [Gear]    [Gear]     [Gear]
+      //           [Obsidian][Temporal] [Obsidian]
+      //           [Gear]    [Obsidian] [Gear]
+      //
+      // Uncomment to override:
+      // "CustomRecipe": {
+      //   "IngredientPattern": "GGG,STS,GSG",
+      //   "Ingredients": {
+      //     "G": { "Type": "item", "Code": "game:gear-rusty", "Quantity": 1 },
+      //     "S": { "Type": "block", "Code": "game:rock-obsidian" },
+      //     "T": { "Type": "item", "Code": "game:gear-temporal", "Quantity": 1 }
+      //   },
+      //   "Width": 3,
+      //   "Height": 3,
+      //   "Output": { "Quantity": 1 }
+      // }
+    },
+
+    "heroscallstone": {
+      "Enabled": true,
+      "AllowCrafting": true,
+      "GiveOnFirstJoin": false,
+      "_comment": "Default recipe: 4 Rusty Gears, 4 Obsidian, 1 Temporal Gear"
+
+      // Default recipe (for reference):
+      // Pattern:  [Gear]    [Obsidian] [Gear]
+      //           [Obsidian][Temporal] [Obsidian]
+      //           [Gear]    [Obsidian] [Gear]
+      //
+      // Uncomment to override:
+      // "CustomRecipe": {
+      //   "IngredientPattern": "GSG,STS,GSG",
+      //   "Ingredients": {
+      //     "G": { "Type": "item", "Code": "game:gear-rusty", "Quantity": 1 },
+      //     "S": { "Type": "block", "Code": "game:rock-obsidian" },
+      //     "T": { "Type": "item", "Code": "game:gear-temporal", "Quantity": 1 }
+      //   },
+      //   "Width": 3,
+      //   "Height": 3,
+      //   "Output": { "Quantity": 1 }
+      // }
+
+      // To disable entirely:
+      // "Enabled": false
+
+      // To disable crafting but allow existing items:
+      // "AllowCrafting": false
+    }
+  },
+
+  "_examples": {
+    "_comment": "Recipe Pattern Examples",
+
+    "Simple 3x3 Grid": {
+      "IngredientPattern": "AAA,ABA,AAA",
+      "Width": 3,
+      "Height": 3
+    },
+
+    "2x2 Grid": {
+      "IngredientPattern": "AB,CD",
+      "Width": 2,
+      "Height": 2
+    },
+
+    "Horizontal Row": {
+      "IngredientPattern": "   ,ABC,   ",
+      "Width": 3,
+      "Height": 3
+    },
+
+    "Vertical Column": {
+      "IngredientPattern": "A  , B , C ",
+      "Width": 3,
+      "Height": 3
+    },
+
+    "_ingredient_types": {
+      "item_example": { "Type": "item", "Code": "game:ingot-iron", "Quantity": 1 },
+      "block_example": { "Type": "block", "Code": "game:rock-granite" },
+      "with_variants": { "Type": "item", "Code": "game:gem-*", "AllowedVariants": ["diamond", "emerald"] }
+    }
+  }
+}

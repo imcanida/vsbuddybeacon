@@ -12,8 +12,21 @@ namespace VSBuddyBeacon
     /// </summary>
     public class ItemBeaconBand : ItemWearable
     {
+        private bool IsEnabled()
+        {
+            var modSystem = api.ModLoader.GetModSystem<VSBuddyBeaconModSystem>();
+            return modSystem?.IsItemEnabled("beaconband") ?? true;
+        }
+
         public override void OnHeldInteractStart(ItemSlot slot, EntityAgent byEntity, BlockSelection blockSel, EntitySelection entitySel, bool firstEvent, ref EnumHandHandling handling)
         {
+            // If disabled, do nothing
+            if (!IsEnabled())
+            {
+                handling = EnumHandHandling.PreventDefault;
+                return;
+            }
+
             if (api.Side != EnumAppSide.Client)
             {
                 handling = EnumHandHandling.PreventDefault;
@@ -32,6 +45,14 @@ namespace VSBuddyBeacon
 
         public override void GetHeldItemInfo(ItemSlot inSlot, StringBuilder dsc, IWorldAccessor world, bool withDebugInfo)
         {
+            // Show inert description if disabled (replace everything)
+            if (!IsEnabled())
+            {
+                dsc.Clear();
+                dsc.AppendLine("An inert object with untapped potential...");
+                return;
+            }
+
             base.GetHeldItemInfo(inSlot, dsc, world, withDebugInfo);
 
             string code = inSlot.Itemstack.Attributes.GetString("beaconCode", "");
@@ -50,6 +71,12 @@ namespace VSBuddyBeacon
 
         public override WorldInteraction[] GetHeldInteractionHelp(ItemSlot inSlot)
         {
+            // No interaction help if disabled
+            if (!IsEnabled())
+            {
+                return new WorldInteraction[0];
+            }
+
             return new WorldInteraction[]
             {
                 new WorldInteraction()

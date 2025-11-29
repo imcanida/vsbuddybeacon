@@ -1,15 +1,14 @@
 [
 	{
-		"ingredientPattern": "GCG,ITI,GRG",
+		"name": "Wayfinder's Compass",
+		"ingredientPattern": "GGG,STS,GSG",
 		"ingredients": {
 			"G": { "type": "item", "code": "game:gear-rusty" },
-			"C": { "type": "item", "code": "game:compass-base" },
-			"I": { "type": "item", "code": "game:ingot-iron" },
-			"T": { "type": "item", "code": "game:gear-temporal" },
-			"R": { "type": "item", "code": "game:resonancearchive-1" }
+			"S": { "type": "block", "code": "game:rock-obsidian" },
+			"T": { "type": "item", "code": "game:gear-temporal" }
 		},
 		"width": 3,
 		"height": 3,
-		"output": { "type": "item", "code": "vsbuddybeacon:wayfindercompass" }
+		"output": { "type": "item", "code": "vsbuddybeacon:wayfindercompass", "quantity": 1 }
 	}
 ]

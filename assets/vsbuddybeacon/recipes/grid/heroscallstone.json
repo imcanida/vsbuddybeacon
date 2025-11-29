@@ -1,13 +1,14 @@
 [
 	{
+		"name": "Hero's Call Stone",
 		"ingredientPattern": "GSG,STS,GSG",
 		"ingredients": {
 			"G": { "type": "item", "code": "game:gear-rusty" },
-			"S": { "type": "block", "code": "game:rock-peridotite", "allowedVariants": ["*"] },
+			"S": { "type": "block", "code": "game:rock-obsidian" },
 			"T": { "type": "item", "code": "game:gear-temporal" }
 		},
 		"width": 3,
 		"height": 3,
-		"output": { "type": "item", "code": "vsbuddybeacon:heroscallstone" }
+		"output": { "type": "item", "code": "vsbuddybeacon:heroscallstone", "quantity": 1 }
 	}
 ]
