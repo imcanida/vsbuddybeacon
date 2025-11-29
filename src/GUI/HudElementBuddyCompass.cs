@@ -6,15 +6,9 @@ using Vintagestory.API.MathTools;
 
 namespace VSBuddyBeacon
 {
-    public class BuddyPosition
-    {
-        public string Name { get; set; }
-        public Vec3d Position { get; set; }
-    }
-
     public class HudElementBuddyCompass : HudElement
     {
-        private List<BuddyPosition> buddyPositions = new();
+        private List<BuddyPositionWithTimestamp> buddyPositions = new();
         private long tickListenerId;
         private bool isComposed = false;
 
@@ -37,13 +31,20 @@ namespace VSBuddyBeacon
             }
         }
 
-        public void UpdateBuddyPositions(List<BuddyPosition> positions)
+        public void UpdateBuddyPositions(List<BuddyPositionWithTimestamp> positions)
         {
-            buddyPositions = positions ?? new List<BuddyPosition>();
+            buddyPositions = positions ?? new List<BuddyPositionWithTimestamp>();
         }
 
         private void OnTick(float dt)
         {
+            // Remove expired buddies
+            if (buddyPositions.Count > 0)
+            {
+                long currentTime = capi.World.ElapsedMilliseconds;
+                buddyPositions.RemoveAll(b => b.GetStalenessLevel(currentTime) == StalenessLevel.Expired);
+            }
+
             // Trigger redraw if we have buddies
             if (isComposed && buddyPositions.Count > 0)
             {
@@ -82,10 +83,16 @@ namespace VSBuddyBeacon
 
             Vec3d playerPos = player.Pos.XYZ;
             float playerYaw = player.Pos.Yaw;
+            long currentTime = capi.World.ElapsedMilliseconds;
 
             double y = 5;
             foreach (var buddy in buddyPositions)
             {
+                // Check staleness and skip expired
+                var staleness = buddy.GetStalenessLevel(currentTime);
+                if (staleness == StalenessLevel.Expired)
+                    continue;
+
                 // Calculate direction and distance
                 double dx = buddy.Position.X - playerPos.X;
                 double dz = buddy.Position.Z - playerPos.Z;
@@ -110,8 +117,9 @@ namespace VSBuddyBeacon
                 ctx.Rectangle(0, y - 2, 195, 22);
                 ctx.Fill();
 
-                // Draw text
-                ctx.SetSourceRGBA(0.4, 0.9, 0.4, 1.0); // Green for buddies
+                // Draw text with staleness-based color
+                var color = GetStalenessColor(staleness);
+                ctx.SetSourceRGBA(color.r, color.g, color.b, 1.0);
                 ctx.SelectFontFace("Sans", FontSlant.Normal, FontWeight.Normal);
                 ctx.SetFontSize(12);
 
@@ -140,6 +148,18 @@ namespace VSBuddyBeacon
             if (degrees >= -67.5 && degrees < -22.5) return "\\";
 
             return "?";
+        }
+
+        private (double r, double g, double b) GetStalenessColor(StalenessLevel level)
+        {
+            switch (level)
+            {
+                case StalenessLevel.Fresh: return (0.2, 0.9, 0.2);      // Bright green
+                case StalenessLevel.Aging: return (0.9, 0.9, 0.2);      // Yellow
+                case StalenessLevel.Stale: return (1.0, 0.6, 0.0);      // Orange
+                case StalenessLevel.VeryStale: return (0.9, 0.1, 0.1);  // Red
+                default: return (0.5, 0.5, 0.5);                        // Gray (shouldn't render)
+            }
         }
 
         public override void Dispose()

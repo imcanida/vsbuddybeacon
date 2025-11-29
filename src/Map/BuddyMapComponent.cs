@@ -10,27 +10,56 @@ namespace VSBuddyBeacon
     {
         public string PlayerName { get; set; }
         public Vec3d Position { get; set; }
+        public long ClientReceivedTime { get; set; }  // Track when we last received an update
 
         private ICoreClientAPI capi;
-        private LoadedTexture texture;
+        private System.Collections.Generic.Dictionary<StalenessLevel, LoadedTexture> textures;
         private Vec2f viewPos = new Vec2f();
 
-        public BuddyMapComponent(ICoreClientAPI capi, LoadedTexture texture, string playerName, Vec3d position)
+        public BuddyMapComponent(ICoreClientAPI capi, System.Collections.Generic.Dictionary<StalenessLevel, LoadedTexture> textures, string playerName, Vec3d position, long clientReceivedTime)
         {
             this.capi = capi;
-            this.texture = texture;
+            this.textures = textures;
             this.PlayerName = playerName;
             this.Position = position;
+            this.ClientReceivedTime = clientReceivedTime;
         }
 
-        public void UpdatePosition(Vec3d newPosition)
+        public void UpdatePosition(Vec3d newPosition, long newReceivedTime)
         {
             Position = newPosition;
+            ClientReceivedTime = newReceivedTime;
+        }
+
+        /// <summary>
+        /// Calculate staleness based on current time
+        /// </summary>
+        private StalenessLevel GetCurrentStaleness()
+        {
+            long currentTime = capi.World.ElapsedMilliseconds;
+            float age = (currentTime - ClientReceivedTime) / 1000f;
+
+            if (age < 3f) return StalenessLevel.Fresh;
+            if (age < 10f) return StalenessLevel.Aging;
+            if (age < 30f) return StalenessLevel.Stale;
+            if (age < 60f) return StalenessLevel.VeryStale;
+            return StalenessLevel.Expired;
         }
 
         public void Render(GuiElementMap mapElem, float dt)
         {
             if (Position == null) return;
+
+            // Calculate current staleness based on time
+            var staleness = GetCurrentStaleness();
+
+            // Don't render if expired
+            if (staleness == StalenessLevel.Expired)
+                return;
+
+            // Get texture for current staleness level
+            if (!textures.TryGetValue(staleness, out var currentTexture))
+                return;
 
             mapElem.TranslateWorldPosToViewPos(Position, ref viewPos);
 
@@ -47,14 +76,14 @@ namespace VSBuddyBeacon
 
             capi.Render.GlToggleBlend(true);
 
-            // Render the marker texture
+            // Render the marker texture (high z-depth to render on top of map tiles)
             capi.Render.Render2DTexturePremultipliedAlpha(
-                texture.TextureId,
+                currentTexture.TextureId,
                 (float)(mapElem.Bounds.renderX + x - size/2),
                 (float)(mapElem.Bounds.renderY + y - size/2),
                 size,
                 size,
-                50f
+                500f
             );
         }
 

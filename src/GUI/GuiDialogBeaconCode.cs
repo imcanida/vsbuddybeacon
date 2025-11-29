@@ -35,7 +35,7 @@ namespace VSBuddyBeacon
                 ElementBounds.Fixed(15, 40, 370, 45));
 
             // Text input
-            composer.AddStaticText("Beacon Code:", CairoFont.WhiteSmallText(),
+            composer.AddStaticText("Code:", CairoFont.WhiteSmallText(),
                 ElementBounds.Fixed(15, 90, 100, 20));
 
             composer.AddTextInput(

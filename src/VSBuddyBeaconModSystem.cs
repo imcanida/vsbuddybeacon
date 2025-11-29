@@ -320,12 +320,85 @@ namespace VSBuddyBeacon
                 // Remove beacon
                 playerBeaconCodes.Remove(fromPlayer.PlayerUID);
                 sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} cleared their beacon code");
+
+                // Also clear from item if found
+                UpdateBeaconBandItem(fromPlayer, "");
             }
             else
             {
                 // Set beacon
                 playerBeaconCodes[fromPlayer.PlayerUID] = code;
                 sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} set beacon code to \"{code}\"");
+
+                // Also save to item for persistence across disconnects
+                UpdateBeaconBandItem(fromPlayer, code);
+            }
+        }
+
+        /// <summary>
+        /// Updates the beacon code on the server's copy of the beacon band item
+        /// This ensures persistence across disconnects/reconnects
+        /// When setting a code, only ONE beacon band gets the code - all others are cleared
+        /// This prevents conflicts from multiple beacon bands
+        /// </summary>
+        private void UpdateBeaconBandItem(IServerPlayer player, string code)
+        {
+            var inv = player.InventoryManager;
+            if (inv == null) return;
+
+            var hotbar = inv.GetOwnInventory("hotbar");
+            var backpack = inv.GetOwnInventory("backpack");
+            var character = inv.GetOwnInventory("character");
+
+            bool foundFirst = false;
+            int updatedCount = 0;
+
+            foreach (var inventory in new[] { hotbar, backpack, character })
+            {
+                if (inventory == null) continue;
+
+                try
+                {
+                    foreach (var slot in inventory)
+                    {
+                        if (slot?.Itemstack?.Item is ItemBeaconBand)
+                        {
+                            if (!foundFirst && !string.IsNullOrEmpty(code))
+                            {
+                                // First beacon band found - set the code
+                                slot.Itemstack.Attributes.SetString("beaconCode", code);
+                                slot.MarkDirty();
+                                foundFirst = true;
+                                updatedCount++;
+                                sapi.Logger.Debug($"[VSBuddyBeacon] Set beacon code \"{code}\" on first beacon band for {player.PlayerName}");
+                            }
+                            else
+                            {
+                                // Clear any other beacon bands to prevent conflicts
+                                if (slot.Itemstack.Attributes.HasAttribute("beaconCode"))
+                                {
+                                    slot.Itemstack.Attributes.RemoveAttribute("beaconCode");
+                                    slot.MarkDirty();
+                                    updatedCount++;
+                                    sapi.Logger.Debug($"[VSBuddyBeacon] Cleared beacon code from extra beacon band for {player.PlayerName}");
+                                }
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // Skip inventories that can't be enumerated safely
+                }
+            }
+
+            if (updatedCount == 0)
+            {
+                sapi.Logger.Debug($"[VSBuddyBeacon] No beacon band found in inventory for {player.PlayerName} - code only saved to memory");
+            }
+            else
+            {
+                sapi.Logger.Notification($"[VSBuddyBeacon] Updated {updatedCount} beacon band(s) for {player.PlayerName}");
             }
         }
 
@@ -342,11 +415,12 @@ namespace VSBuddyBeacon
             var inv = player.InventoryManager;
             if (inv == null) return null;
 
-            // Only check hotbar and backpack - avoid creative/other special inventories
+            // Check hotbar, backpack, and character equipment - avoid creative/other special inventories
             var hotbar = inv.GetOwnInventory("hotbar");
             var backpack = inv.GetOwnInventory("backpack");
+            var character = inv.GetOwnInventory("character");
 
-            foreach (var inventory in new[] { hotbar, backpack })
+            foreach (var inventory in new[] { hotbar, backpack, character })
             {
                 if (inventory == null) continue;
 
@@ -375,6 +449,8 @@ namespace VSBuddyBeacon
 
         private void BroadcastBeaconPositions()
         {
+            long currentTime = sapi.World.ElapsedMilliseconds;  // Capture timestamp once for consistency
+
             // Group players by beacon code (from worn/inventory items OR manual setting)
             var codeGroups = new Dictionary<string, List<IServerPlayer>>();
 
@@ -382,13 +458,18 @@ namespace VSBuddyBeacon
             {
                 if (player?.Entity == null) continue;
 
-                // First check if player has a beacon band equipped or in inventory
-                string code = GetPlayerBeaconCode(player);
-
-                // Fall back to manually set beacon code if no band found
-                if (string.IsNullOrEmpty(code) && playerBeaconCodes.TryGetValue(player.PlayerUID, out string manualCode))
+                // Priority: playerBeaconCodes (instant) over item attributes (slow sync)
+                // This fixes race condition where code changes take 1-2s to sync via item attributes
+                string code = null;
+                if (playerBeaconCodes.TryGetValue(player.PlayerUID, out string manualCode))
                 {
-                    code = manualCode;
+                    code = manualCode;  // Manual code takes precedence
+                }
+
+                // Fall back to beacon band in inventory if no manual code set
+                if (string.IsNullOrEmpty(code))
+                {
+                    code = GetPlayerBeaconCode(player);
                 }
 
                 if (string.IsNullOrEmpty(code)) continue;
@@ -423,7 +504,8 @@ namespace VSBuddyBeacon
                         PlayerNames = others.Select(p => p.PlayerName).ToArray(),
                         PosX = others.Select(p => p.Entity.Pos.X).ToArray(),
                         PosY = others.Select(p => p.Entity.Pos.Y).ToArray(),
-                        PosZ = others.Select(p => p.Entity.Pos.Z).ToArray()
+                        PosZ = others.Select(p => p.Entity.Pos.Z).ToArray(),
+                        Timestamps = others.Select(_ => currentTime).ToArray()
                     };
 
                     sapi.Logger.Debug($"[VSBuddyBeacon] Sending {others.Count} buddy positions to {recipient.PlayerName}");
@@ -686,20 +768,28 @@ namespace VSBuddyBeacon
 
         private void OnBeaconPositionsReceived(BeaconPositionPacket packet)
         {
+            long clientReceiveTime = capi.World.ElapsedMilliseconds;  // Capture immediately
+
             if (packet.PlayerNames == null || packet.PlayerNames.Length == 0)
             {
-                buddyCompassHud?.UpdateBuddyPositions(new List<BuddyPosition>());
-                buddyMapLayer?.UpdateBuddyPositions(new List<BuddyPosition>());
+                buddyCompassHud?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
+                buddyMapLayer?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
                 return;
             }
 
-            var positions = new List<BuddyPosition>();
+            var positions = new List<BuddyPositionWithTimestamp>();
             for (int i = 0; i < packet.PlayerNames.Length; i++)
             {
-                positions.Add(new BuddyPosition
+                long serverTimestamp = packet.Timestamps != null && i < packet.Timestamps.Length
+                    ? packet.Timestamps[i]
+                    : clientReceiveTime;  // Fallback for backward compatibility
+
+                positions.Add(new BuddyPositionWithTimestamp
                 {
                     Name = packet.PlayerNames[i],
-                    Position = new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i])
+                    Position = new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i]),
+                    ServerTimestamp = serverTimestamp,
+                    ClientReceivedTime = clientReceiveTime
                 });
             }
 

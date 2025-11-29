@@ -13,7 +13,7 @@ namespace VSBuddyBeacon
     {
         private Dictionary<string, BuddyMapComponent> buddyComponents = new Dictionary<string, BuddyMapComponent>();
         private ICoreClientAPI capi;
-        private LoadedTexture buddyTexture;
+        private Dictionary<StalenessLevel, LoadedTexture> buddyTextures = new Dictionary<StalenessLevel, LoadedTexture>();
 
         public override string Title => "Buddy Beacons";
         public override EnumMapAppSide DataSide => EnumMapAppSide.Client;
@@ -24,11 +24,21 @@ namespace VSBuddyBeacon
             capi = api as ICoreClientAPI;
         }
 
-        private void EnsureTextureCreated()
+        private void EnsureTexturesCreated()
         {
-            if (capi == null || buddyTexture != null) return;
+            if (capi == null || buddyTextures.Count > 0) return;
 
             int size = (int)GuiElement.scaled(24);
+
+            // Create texture for each staleness level
+            CreateTextureForLevel(StalenessLevel.Fresh, size, 0.2, 0.8, 0.2);      // Green
+            CreateTextureForLevel(StalenessLevel.Aging, size, 0.9, 0.9, 0.2);      // Yellow
+            CreateTextureForLevel(StalenessLevel.Stale, size, 1.0, 0.6, 0.0);      // Orange
+            CreateTextureForLevel(StalenessLevel.VeryStale, size, 0.9, 0.1, 0.1);  // Red
+        }
+
+        private void CreateTextureForLevel(StalenessLevel level, int size, double r, double g, double b)
+        {
             ImageSurface surface = new ImageSurface(Format.Argb32, size, size);
             Context ctx = new Context(surface);
 
@@ -36,7 +46,7 @@ namespace VSBuddyBeacon
             ctx.SetSourceRGBA(0, 0, 0, 0);
             ctx.Paint();
 
-            // Draw a green circle with white border
+            // Draw a circle with white border and colored fill
             double cx = size / 2.0;
             double cy = size / 2.0;
             double radius = size / 2.0 - 2;
@@ -46,12 +56,12 @@ namespace VSBuddyBeacon
             ctx.Arc(cx, cy, radius, 0, 2 * Math.PI);
             ctx.Fill();
 
-            // Green fill
-            ctx.SetSourceRGBA(0.2, 0.8, 0.2, 1);
+            // Colored fill (based on staleness level)
+            ctx.SetSourceRGBA(r, g, b, 1);
             ctx.Arc(cx, cy, radius - 2, 0, 2 * Math.PI);
             ctx.Fill();
 
-            buddyTexture = new LoadedTexture(capi, capi.Gui.LoadCairoTexture(surface, false), size / 2, size / 2);
+            buddyTextures[level] = new LoadedTexture(capi, capi.Gui.LoadCairoTexture(surface, false), size / 2, size / 2);
 
             ctx.Dispose();
             surface.Dispose();
@@ -59,7 +69,7 @@ namespace VSBuddyBeacon
 
         public override void OnMapOpenedClient()
         {
-            EnsureTextureCreated();
+            EnsureTexturesCreated();
 
             // Clear existing components
             foreach (var comp in buddyComponents.Values)
@@ -69,28 +79,35 @@ namespace VSBuddyBeacon
             buddyComponents.Clear();
         }
 
-        public void UpdateBuddyPositions(List<BuddyPosition> positions)
+        public void UpdateBuddyPositions(List<BuddyPositionWithTimestamp> positions)
         {
             if (capi == null) return;
-            EnsureTextureCreated();
-            if (buddyTexture == null) return;
+            EnsureTexturesCreated();
+            if (buddyTextures.Count == 0) return;
+
+            long currentTime = capi.World.ElapsedMilliseconds;
 
             // Update or create components for each buddy
             HashSet<string> currentBuddies = new HashSet<string>();
 
             foreach (var buddy in positions)
             {
+                // Skip expired (already too old)
+                var staleness = buddy.GetStalenessLevel(currentTime);
+                if (staleness == StalenessLevel.Expired)
+                    continue;
+
                 currentBuddies.Add(buddy.Name);
 
                 if (buddyComponents.TryGetValue(buddy.Name, out var existing))
                 {
-                    // Update existing
-                    existing.UpdatePosition(buddy.Position);
+                    // Update existing - pass the received time so it can track staleness
+                    existing.UpdatePosition(buddy.Position, buddy.ClientReceivedTime);
                 }
                 else
                 {
-                    // Create new
-                    buddyComponents[buddy.Name] = new BuddyMapComponent(capi, buddyTexture, buddy.Name, buddy.Position);
+                    // Create new - pass received time instead of staleness level
+                    buddyComponents[buddy.Name] = new BuddyMapComponent(capi, buddyTextures, buddy.Name, buddy.Position, buddy.ClientReceivedTime);
                 }
             }
 
@@ -138,8 +155,11 @@ namespace VSBuddyBeacon
             }
             buddyComponents.Clear();
 
-            buddyTexture?.Dispose();
-            buddyTexture = null;
+            foreach (var texture in buddyTextures.Values)
+            {
+                texture?.Dispose();
+            }
+            buddyTextures.Clear();
 
             base.Dispose();
         }

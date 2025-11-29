@@ -2,22 +2,29 @@
 	"code": "beaconband",
 	"class": "ItemBeaconBand",
 	"maxstacksize": 1,
-	"clothescategory": "bracers",
-	"heldTpUseAnimation": "interactstatic",
-	"creativeinventory": {
-		"general": ["*"],
-		"items": ["*"]
-	},
-	"shape": { "base": "game:entity/humanoid/seraph/clothing/arm/silver-bracelet" },
-	"textures": {
-		"bracelets2": { "base": "game:entity/humanoid/seraphclothes/arm/bracelets2" }
-	},
 	"attributes": {
+		"clothescategory": "arm",
+		"wearableAttachment": true,
+		"warmth": 0,
 		"displaycaseable": true,
 		"shelvable": true,
 		"handbook": {
 			"groupBy": ["beaconband"]
 		}
+	},
+	"storageFlags": 128,
+	"shape": { "base": "game:entity/humanoid/seraph/clothing/arm/silver-bracelet" },
+	"texturesByType": {
+		"*": {
+			"seraph": { "base": "game:block/transparent" }
+		}
+	},
+	"renderAlphaTest": 0.25,
+	"heldTpUseAnimation": "interactstatic",
+	"creativeinventory": {
+		"general": ["*"],
+		"items": ["*"],
+		"clothing": ["*"]
 	},
 	"lightHsv": [8, 4, 10],
 	"materialDensity": 2000,
@@ -32,6 +39,8 @@
 		"scale": 0.55
 	},
 	"guiTransform": {
+		"rotate": false,
+		"translation": { "x": 0, "y": 0, "z": 0 },
 		"rotation": { "x": 0, "y": 151, "z": -8 },
 		"origin": { "x": 0.75, "y": 0.8, "z": 0.6 },
 		"scale": 4.61
@@ -39,7 +48,7 @@
 	"groundTransform": {
 		"translation": { "x": 0.05, "y": -0.19, "z": 0 },
 		"rotation": { "x": 0, "y": 0, "z": 0 },
-		"origin": { "x": 0.5, "y": 0.5, "z": 0.53 },
+		"origin": { "x": 0.5, "y": 0.5, "z": 0.5299 },
 		"scale": 4
 	}
 }

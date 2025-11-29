@@ -23,5 +23,8 @@ namespace VSBuddyBeacon
 
         [ProtoMember(4)]
         public double[] PosZ { get; set; }
+
+        [ProtoMember(5)]
+        public long[] Timestamps { get; set; }  // Server's ElapsedMilliseconds when position was captured
     }
 }
