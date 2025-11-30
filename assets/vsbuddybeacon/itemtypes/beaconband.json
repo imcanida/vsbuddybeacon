@@ -25,7 +25,6 @@
 		"items": ["*"],
 		"clothing": ["*"]
 	},
-	"lightHsv": [8, 4, 10],
 	"materialDensity": 2000,
 	"fpHandTransform": {
 		"translation": { "x": 0.6, "y": 0, "z": -0.5 },

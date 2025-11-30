@@ -23,7 +23,6 @@
 			"groupBy": ["heroscallstone"]
 		}
 	},
-	"lightHsv": [15, 5, 8],
 	"materialDensity": 3000,
 	"fpHandTransform": {
 		"translation": { "x": -0.25, "y": 0.27, "z": 0.8 },
