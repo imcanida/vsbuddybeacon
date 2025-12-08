@@ -16,7 +16,6 @@ namespace VSBuddyBeacon
         private const float REQUEST_TIMEOUT_SECONDS = 30f;
         private const float BEACON_UPDATE_INTERVAL = 1.0f;
         private const float SILENCE_DURATION_MINUTES = 10f;
-        private const int REQUESTS_BEFORE_SILENCE_OPTION = 1; // Show silence button after 2nd request
 
         // Server-side: Track pending requests
         private Dictionary<long, PendingTeleportRequest> pendingRequests = new();
@@ -66,6 +65,36 @@ namespace VSBuddyBeacon
             return config?.IsItemEnabled(itemCode) ?? true;
         }
 
+        /// <summary>
+        /// Check if verbose logging is enabled (for use by GUI classes)
+        /// </summary>
+        public bool IsVerboseLoggingEnabled()
+        {
+            return config?.VerboseLogging ?? false;
+        }
+
+        /// <summary>
+        /// Log a debug message (only if VerboseLogging is enabled)
+        /// </summary>
+        private void LogDebug(ICoreAPI api, string message)
+        {
+            if (config?.VerboseLogging ?? false)
+            {
+                api.Logger.Debug(message);
+            }
+        }
+
+        /// <summary>
+        /// Log an info/notification message (only if VerboseLogging is enabled)
+        /// </summary>
+        private void LogInfo(ICoreAPI api, string message)
+        {
+            if (config?.VerboseLogging ?? false)
+            {
+                api.Logger.Notification(message);
+            }
+        }
+
         private ModConfig LoadConfig(ICoreAPI api)
         {
             try
@@ -111,35 +140,35 @@ namespace VSBuddyBeacon
                 return;
             }
 
-            serverApi.Logger.Notification($"[VSBuddyBeacon] ConfigureRecipes starting. Total recipes before: {serverApi.World.GridRecipes.Count}");
+            LogInfo(serverApi, $"[VSBuddyBeacon] ConfigureRecipes starting. Total recipes before: {serverApi.World.GridRecipes.Count}");
 
             foreach (var itemKvp in config.Items)
             {
                 string itemCode = itemKvp.Key;
                 var itemConfig = itemKvp.Value;
 
-                serverApi.Logger.Notification($"[VSBuddyBeacon] Processing {itemCode}: Enabled={itemConfig.Enabled}, AllowCrafting={itemConfig.AllowCrafting}, HasCustom={itemConfig.CustomRecipe != null}");
+                LogInfo(serverApi, $"[VSBuddyBeacon] Processing {itemCode}: Enabled={itemConfig.Enabled}, AllowCrafting={itemConfig.AllowCrafting}, HasCustom={itemConfig.CustomRecipe != null}");
 
                 if (!itemConfig.Enabled || !itemConfig.AllowCrafting)
                 {
                     // Item disabled or crafting disabled - remove recipe
-                    serverApi.Logger.Notification($"[VSBuddyBeacon] Removing recipe for {itemCode} (disabled or crafting disabled)");
+                    LogInfo(serverApi, $"[VSBuddyBeacon] Removing recipe for {itemCode} (disabled or crafting disabled)");
                     RemoveRecipe(serverApi, itemCode);
                 }
                 else if (itemConfig.CustomRecipe != null)
                 {
                     // Remove default, add custom
-                    serverApi.Logger.Notification($"[VSBuddyBeacon] Replacing recipe for {itemCode} with custom recipe");
+                    LogInfo(serverApi, $"[VSBuddyBeacon] Replacing recipe for {itemCode} with custom recipe");
                     RemoveRecipe(serverApi, itemCode);
                     AddCustomRecipe(serverApi, itemCode, itemConfig.CustomRecipe);
                 }
                 else
                 {
-                    serverApi.Logger.Notification($"[VSBuddyBeacon] Keeping default recipe for {itemCode}");
+                    LogInfo(serverApi, $"[VSBuddyBeacon] Keeping default recipe for {itemCode}");
                 }
             }
 
-            serverApi.Logger.Notification($"[VSBuddyBeacon] ConfigureRecipes complete. Total recipes after: {serverApi.World.GridRecipes.Count}");
+            LogInfo(serverApi, $"[VSBuddyBeacon] ConfigureRecipes complete. Total recipes after: {serverApi.World.GridRecipes.Count}");
         }
 
         private void RemoveRecipe(ICoreServerAPI serverApi, string itemCode)
@@ -157,7 +186,7 @@ namespace VSBuddyBeacon
                 });
 
                 if (removed > 0)
-                    serverApi.Logger.Notification($"[VSBuddyBeacon] Removed {removed} recipe(s) for {itemCode}");
+                    LogInfo(serverApi, $"[VSBuddyBeacon] Removed {removed} recipe(s) for {itemCode}");
             }
             catch (Exception ex)
             {
@@ -171,7 +200,7 @@ namespace VSBuddyBeacon
             {
                 var recipe = ParseCustomRecipe(serverApi, itemCode, recipeConfig);
                 serverApi.World.GridRecipes.Add(recipe);
-                serverApi.Logger.Notification($"[VSBuddyBeacon] Added custom recipe for {itemCode}");
+                LogInfo(serverApi, $"[VSBuddyBeacon] Added custom recipe for {itemCode}");
             }
             catch (Exception ex)
             {
@@ -312,7 +341,7 @@ namespace VSBuddyBeacon
 
             if (success)
             {
-                sapi.Logger.Debug($"[VSBuddyBeacon] Gave {itemCode} to {player.PlayerName}");
+                LogDebug(sapi, $"[VSBuddyBeacon] Gave {itemCode} to {player.PlayerName}");
             }
             else
             {
@@ -400,6 +429,23 @@ namespace VSBuddyBeacon
                 api.Logger.Notification("[VSBuddyBeacon] Buddy map layer registered");
             }
 
+            // Register test command to simulate teleport requests (for testing dialog z-order)
+            api.RegisterCommand("buddytest", "Test buddy beacon dialog", "", (int groupId, CmdArgs args) =>
+            {
+                // Simulate a teleport prompt
+                var testPacket = new TeleportPromptPacket
+                {
+                    RequesterName = "TestPlayer",
+                    RequestType = TeleportRequestType.TeleportTo,
+                    RequestId = 9999,
+                    RequestCount = 1,
+                    RequesterUid = "test-uid-12345",
+                    RequestTimestamp = capi.World.ElapsedMilliseconds
+                };
+                OnTeleportPromptReceived(testPacket);
+                capi.ShowChatMessage("[BuddyTest] Teleport prompt opened for testing");
+            });
+
             api.Logger.Notification("[VSBuddyBeacon] Client-side initialized");
         }
 
@@ -413,7 +459,7 @@ namespace VSBuddyBeacon
             {
                 // Remove beacon
                 playerBeaconCodes.Remove(fromPlayer.PlayerUID);
-                sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} cleared their beacon code");
+                LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} cleared their beacon code");
 
                 // Also clear from item if found
                 UpdateBeaconBandItem(fromPlayer, "");
@@ -422,7 +468,7 @@ namespace VSBuddyBeacon
             {
                 // Set beacon
                 playerBeaconCodes[fromPlayer.PlayerUID] = code;
-                sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} set beacon code to \"{code}\"");
+                LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} set beacon code to \"{code}\"");
 
                 // Also save to item for persistence across disconnects
                 UpdateBeaconBandItem(fromPlayer, code);
@@ -464,7 +510,7 @@ namespace VSBuddyBeacon
                                 slot.MarkDirty();
                                 foundFirst = true;
                                 updatedCount++;
-                                sapi.Logger.Debug($"[VSBuddyBeacon] Set beacon code \"{code}\" on first beacon band for {player.PlayerName}");
+                                LogDebug(sapi, $"[VSBuddyBeacon] Set beacon code \"{code}\" on first beacon band for {player.PlayerName}");
                             }
                             else
                             {
@@ -474,7 +520,7 @@ namespace VSBuddyBeacon
                                     slot.Itemstack.Attributes.RemoveAttribute("beaconCode");
                                     slot.MarkDirty();
                                     updatedCount++;
-                                    sapi.Logger.Debug($"[VSBuddyBeacon] Cleared beacon code from extra beacon band for {player.PlayerName}");
+                                    LogDebug(sapi, $"[VSBuddyBeacon] Cleared beacon code from extra beacon band for {player.PlayerName}");
                                 }
                             }
                         }
@@ -488,11 +534,11 @@ namespace VSBuddyBeacon
 
             if (updatedCount == 0)
             {
-                sapi.Logger.Debug($"[VSBuddyBeacon] No beacon band found in inventory for {player.PlayerName} - code only saved to memory");
+                LogDebug(sapi, $"[VSBuddyBeacon] No beacon band found in inventory for {player.PlayerName} - code only saved to memory");
             }
             else
             {
-                sapi.Logger.Notification($"[VSBuddyBeacon] Updated {updatedCount} beacon band(s) for {player.PlayerName}");
+                LogInfo(sapi, $"[VSBuddyBeacon] Updated {updatedCount} beacon band(s) for {player.PlayerName}");
             }
         }
 
@@ -591,7 +637,7 @@ namespace VSBuddyBeacon
             {
                 if (kvp.Value.Count >= 2)
                 {
-                    sapi.Logger.Debug($"[VSBuddyBeacon] Beacon group '{kvp.Key}': {string.Join(", ", kvp.Value.Select(p => p.PlayerName))}");
+                    LogDebug(sapi, $"[VSBuddyBeacon] Beacon group '{kvp.Key}': {string.Join(", ", kvp.Value.Select(p => p.PlayerName))}");
                 }
             }
 
@@ -614,7 +660,7 @@ namespace VSBuddyBeacon
                         Timestamps = others.Select(_ => currentTime).ToArray()
                     };
 
-                    sapi.Logger.Debug($"[VSBuddyBeacon] Sending {others.Count} buddy positions to {recipient.PlayerName}");
+                    LogDebug(sapi, $"[VSBuddyBeacon] Sending {others.Count} buddy positions to {recipient.PlayerName}");
                     sapi.Network.GetChannel(ChannelName).SendPacket(packet, recipient);
                 }
             }
@@ -668,7 +714,7 @@ namespace VSBuddyBeacon
 
             // Track request count for this requester -> target pair
             int requestCount = IncrementRequestCount(targetPlayer.PlayerUID, fromPlayer.PlayerUID);
-            sapi.Logger.Notification($"[VSBuddyBeacon] Request count for {fromPlayer.PlayerName} -> {targetPlayer.PlayerName}: {requestCount}");
+            LogInfo(sapi, $"[VSBuddyBeacon] Request count for {fromPlayer.PlayerName} -> {targetPlayer.PlayerName}: {requestCount}");
 
             long requestTime = sapi.World.ElapsedMilliseconds;
 
@@ -696,7 +742,7 @@ namespace VSBuddyBeacon
             sapi.Network.GetChannel(ChannelName).SendPacket(prompt, targetPlayer);
             SendResult(fromPlayer, true, $"Request sent to {targetPlayer.PlayerName}. Waiting for response...");
 
-            sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} requested to {(packet.RequestType == TeleportRequestType.TeleportTo ? "teleport to" : "summon")} {targetPlayer.PlayerName} (count: {requestCount})");
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} requested to {(packet.RequestType == TeleportRequestType.TeleportTo ? "teleport to" : "summon")} {targetPlayer.PlayerName} (count: {requestCount})");
         }
 
         private void OnTeleportResponseReceived(IServerPlayer fromPlayer, TeleportResponsePacket packet)
@@ -778,7 +824,7 @@ namespace VSBuddyBeacon
             SendResult(requester, true, requesterMsg);
             SendResult(target, true, targetMsg);
 
-            sapi.Logger.Notification($"[VSBuddyBeacon] Teleport executed: {playerToMove.PlayerName} -> {(requestType == TeleportRequestType.TeleportTo ? target : requester).PlayerName}");
+            LogInfo(sapi, $"[VSBuddyBeacon] Teleport executed: {playerToMove.PlayerName} -> {(requestType == TeleportRequestType.TeleportTo ? target : requester).PlayerName}");
         }
 
         private bool HasTeleportItem(IServerPlayer player, TeleportRequestType requestType)
@@ -897,7 +943,7 @@ namespace VSBuddyBeacon
             {
                 counts = new Dictionary<string, int>();
                 requestCounts[targetUid] = counts;
-                sapi.Logger.Debug($"[VSBuddyBeacon] Created new request count tracker for target {targetUid}");
+                LogDebug(sapi, $"[VSBuddyBeacon] Created new request count tracker for target {targetUid}");
             }
 
             if (!counts.TryGetValue(requesterUid, out int count))
@@ -905,7 +951,7 @@ namespace VSBuddyBeacon
 
             count++;
             counts[requesterUid] = count;
-            sapi.Logger.Debug($"[VSBuddyBeacon] Incremented request count: requester={requesterUid} -> target={targetUid}, new count={count}");
+            LogDebug(sapi, $"[VSBuddyBeacon] Incremented request count: requester={requesterUid} -> target={targetUid}, new count={count}");
             return count;
         }
 
@@ -927,7 +973,7 @@ namespace VSBuddyBeacon
                 .FirstOrDefault(p => p.PlayerUID == playerUidToSilence);
             string silencedName = silencedPlayer?.PlayerName ?? "Unknown";
 
-            sapi.Logger.Notification($"[VSBuddyBeacon] {fromPlayer.PlayerName} silenced {silencedName} for {SILENCE_DURATION_MINUTES} minutes");
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} silenced {silencedName} for {SILENCE_DURATION_MINUTES} minutes");
             SendResult(fromPlayer, true, $"You will not receive requests from {silencedName} for {SILENCE_DURATION_MINUTES} minutes.");
         }
 

@@ -4,6 +4,8 @@ namespace VSBuddyBeacon.Config
 {
     public class ModConfig
     {
+        public bool VerboseLogging { get; set; } = false;
+
         public Dictionary<string, ItemConfig> Items { get; set; } = new Dictionary<string, ItemConfig>
         {
             ["wayfindercompass"] = new ItemConfig(),

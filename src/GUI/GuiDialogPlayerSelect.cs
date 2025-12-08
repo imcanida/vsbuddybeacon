@@ -12,6 +12,9 @@ namespace VSBuddyBeacon
 
         public override string ToggleKeyCombinationCode => null;
 
+        // Override to ensure dialog renders above other dialogs (0 = first, 1 = last)
+        public override double DrawOrder => 0.9;
+
         public GuiDialogPlayerSelect(ICoreClientAPI capi, TeleportRequestType requestType) : base(capi)
         {
             this.requestType = requestType;

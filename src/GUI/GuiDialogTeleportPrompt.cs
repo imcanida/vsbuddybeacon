@@ -19,6 +19,9 @@ namespace VSBuddyBeacon
 
         public override string ToggleKeyCombinationCode => null;
 
+        // Override to ensure dialog renders above other dialogs (0 = first, 1 = last; escape menu uses 0.89)
+        public override double DrawOrder => 0.9;
+
         public GuiDialogTeleportPrompt(ICoreClientAPI capi, string message, long requestId, int requestCount = 0, string requesterUid = null, long requestTimestamp = 0) : base(capi)
         {
             this.message = message;
@@ -43,7 +46,11 @@ namespace VSBuddyBeacon
             double dialogHeight = showSilenceButton ? 170 : 140;
 
             // Debug logging
-            capi.Logger.Notification($"[VSBuddyBeacon] Teleport prompt received. RequestCount: {requestCount}, ShowSilenceButton: {showSilenceButton}");
+            var modSystem = capi.ModLoader.GetModSystem<VSBuddyBeaconModSystem>();
+            if (modSystem?.IsVerboseLoggingEnabled() == true)
+            {
+                capi.Logger.Notification($"[VSBuddyBeacon] Teleport prompt received. RequestCount: {requestCount}, ShowSilenceButton: {showSilenceButton}");
+            }
 
             ElementBounds bgBounds = ElementBounds.Fixed(0, 0, 400, dialogHeight);
 

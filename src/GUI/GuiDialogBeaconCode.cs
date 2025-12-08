@@ -10,6 +10,9 @@ namespace VSBuddyBeacon
 
         public override string ToggleKeyCombinationCode => null;
 
+        // Override to ensure dialog renders above other dialogs (0 = first, 1 = last)
+        public override double DrawOrder => 0.9;
+
         public GuiDialogBeaconCode(ICoreClientAPI capi, ItemSlot slot, string existingCode) : base(capi)
         {
             this.itemSlot = slot;
