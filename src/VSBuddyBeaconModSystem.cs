@@ -30,6 +30,11 @@ namespace VSBuddyBeacon
         // Server-side: Track request counts (TargetUID -> (RequesterUID -> Count))
         private Dictionary<string, Dictionary<string, int>> requestCounts = new();
 
+        // Server-side: Track ping timestamps for rate limiting (PlayerUID -> List of ping times)
+        private Dictionary<string, List<long>> pingTimestamps = new();
+        private const int MAX_PINGS_PER_WINDOW = 3;
+        private const float PING_WINDOW_SECONDS = 10f;
+
         // Client-side references
         private ICoreClientAPI capi;
         private GuiDialogPlayerSelect playerSelectDialog;
@@ -366,11 +371,13 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<BeaconCodeSetPacket>()
                 .RegisterMessageType<BeaconPositionPacket>()
                 .RegisterMessageType<SilencePlayerPacket>()
+                .RegisterMessageType<MapPingPacket>()
                 .SetMessageHandler<TeleportRequestPacket>(OnTeleportRequestReceived)
                 .SetMessageHandler<TeleportResponsePacket>(OnTeleportResponseReceived)
                 .SetMessageHandler<PlayerListRequestPacket>(OnPlayerListRequest)
                 .SetMessageHandler<BeaconCodeSetPacket>(OnBeaconCodeSet)
-                .SetMessageHandler<SilencePlayerPacket>(OnSilencePlayer);
+                .SetMessageHandler<SilencePlayerPacket>(OnSilencePlayer)
+                .SetMessageHandler<MapPingPacket>(OnMapPingReceived);
 
             // Configure recipes after assets load - will be called via AssetsFinalize override
 
@@ -411,10 +418,12 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<BeaconCodeSetPacket>()
                 .RegisterMessageType<BeaconPositionPacket>()
                 .RegisterMessageType<SilencePlayerPacket>()
+                .RegisterMessageType<MapPingPacket>()
                 .SetMessageHandler<TeleportPromptPacket>(OnTeleportPromptReceived)
                 .SetMessageHandler<TeleportResultPacket>(OnTeleportResultReceived)
                 .SetMessageHandler<PlayerListResponsePacket>(OnPlayerListReceived)
-                .SetMessageHandler<BeaconPositionPacket>(OnBeaconPositionsReceived);
+                .SetMessageHandler<BeaconPositionPacket>(OnBeaconPositionsReceived)
+                .SetMessageHandler<MapPingPacket>(OnMapPingReceived);
 
             // Create buddy compass HUD and register it properly
             buddyCompassHud = new HudElementBuddyCompass(capi);
@@ -557,6 +566,9 @@ namespace VSBuddyBeacon
             {
                 counts.Remove(player.PlayerUID);
             }
+
+            // Clear ping rate limit tracking
+            pingTimestamps.Remove(player.PlayerUID);
         }
 
         /// <summary>
@@ -664,6 +676,88 @@ namespace VSBuddyBeacon
                     sapi.Network.GetChannel(ChannelName).SendPacket(packet, recipient);
                 }
             }
+        }
+
+        private void OnMapPingReceived(IServerPlayer fromPlayer, MapPingPacket packet)
+        {
+            long currentTime = sapi.World.ElapsedMilliseconds;
+
+            // Rate limiting: max 3 pings per 10 seconds
+            if (!pingTimestamps.TryGetValue(fromPlayer.PlayerUID, out var timestamps))
+            {
+                timestamps = new List<long>();
+                pingTimestamps[fromPlayer.PlayerUID] = timestamps;
+            }
+
+            // Remove timestamps older than the window
+            long windowStart = currentTime - (long)(PING_WINDOW_SECONDS * 1000);
+            timestamps.RemoveAll(t => t < windowStart);
+
+            if (timestamps.Count >= MAX_PINGS_PER_WINDOW)
+            {
+                // Rate limited - silently ignore
+                LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} rate limited on pings ({timestamps.Count} in window)");
+                return;
+            }
+
+            // Record this ping
+            timestamps.Add(currentTime);
+
+            // Find sender's beacon code
+            string senderCode = null;
+            if (playerBeaconCodes.TryGetValue(fromPlayer.PlayerUID, out string manualCode))
+            {
+                senderCode = manualCode;
+            }
+            if (string.IsNullOrEmpty(senderCode))
+            {
+                senderCode = GetPlayerBeaconCode(fromPlayer);
+            }
+
+            if (string.IsNullOrEmpty(senderCode))
+            {
+                // Player has no beacon code, can't ping
+                LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} tried to ping but has no beacon code");
+                return;
+            }
+
+            // Find all players in the same beacon group
+            var groupMembers = new List<IServerPlayer>();
+            foreach (var player in sapi.World.AllOnlinePlayers.OfType<IServerPlayer>())
+            {
+                if (player?.Entity == null) continue;
+
+                string playerCode = null;
+                if (playerBeaconCodes.TryGetValue(player.PlayerUID, out string code))
+                {
+                    playerCode = code;
+                }
+                if (string.IsNullOrEmpty(playerCode))
+                {
+                    playerCode = GetPlayerBeaconCode(player);
+                }
+
+                if (playerCode == senderCode)
+                {
+                    groupMembers.Add(player);
+                }
+            }
+
+            // Broadcast ping to all group members (including sender so they see their own ping)
+            var pingPacket = new MapPingPacket
+            {
+                SenderName = fromPlayer.PlayerName,
+                PosX = packet.PosX,
+                PosZ = packet.PosZ,
+                Timestamp = sapi.World.ElapsedMilliseconds
+            };
+
+            foreach (var member in groupMembers)
+            {
+                sapi.Network.GetChannel(ChannelName).SendPacket(pingPacket, member);
+            }
+
+            LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} pinged at ({packet.PosX:F0}, {packet.PosZ:F0}) - sent to {groupMembers.Count} group members");
         }
 
         #endregion
@@ -1064,6 +1158,12 @@ namespace VSBuddyBeacon
             buddyMapLayer?.UpdateBuddyPositions(positions);
         }
 
+        private void OnMapPingReceived(MapPingPacket packet)
+        {
+            long clientTime = capi.World.ElapsedMilliseconds;
+            buddyMapLayer?.AddPing(packet.SenderName, packet.PosX, packet.PosZ, clientTime);
+        }
+
         #endregion
 
         #region Public API for Items
@@ -1118,6 +1218,15 @@ namespace VSBuddyBeacon
             capi?.Network.GetChannel(ChannelName).SendPacket(new BeaconCodeSetPacket
             {
                 BeaconCode = beaconCode
+            });
+        }
+
+        public void SendMapPing(double posX, double posZ)
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new MapPingPacket
+            {
+                PosX = posX,
+                PosZ = posZ
             });
         }
 

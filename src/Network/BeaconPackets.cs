@@ -27,4 +27,20 @@ namespace VSBuddyBeacon
         [ProtoMember(5)]
         public long[] Timestamps { get; set; }  // Server's ElapsedMilliseconds when position was captured
     }
+
+    [ProtoContract]
+    public class MapPingPacket
+    {
+        [ProtoMember(1)]
+        public string SenderName { get; set; }
+
+        [ProtoMember(2)]
+        public double PosX { get; set; }
+
+        [ProtoMember(3)]
+        public double PosZ { get; set; }
+
+        [ProtoMember(4)]
+        public long Timestamp { get; set; }
+    }
 }

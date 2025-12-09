@@ -12,6 +12,7 @@ namespace VSBuddyBeacon
     public class BuddyMapLayer : MapLayer
     {
         private Dictionary<string, BuddyMapComponent> buddyComponents = new Dictionary<string, BuddyMapComponent>();
+        private Dictionary<string, PingMapComponent> activePings = new Dictionary<string, PingMapComponent>();  // Key = sender name, only 1 ping per person
         private ICoreClientAPI capi;
         private Dictionary<StalenessLevel, LoadedTexture> buddyTextures = new Dictionary<StalenessLevel, LoadedTexture>();
 
@@ -135,6 +136,25 @@ namespace VSBuddyBeacon
             {
                 comp.Render(mapElem, dt);
             }
+
+            // Render pings and clean up expired ones
+            var expiredPings = new List<string>();
+            foreach (var kvp in activePings)
+            {
+                if (kvp.Value.IsExpired())
+                {
+                    kvp.Value.Dispose();
+                    expiredPings.Add(kvp.Key);
+                }
+                else
+                {
+                    kvp.Value.Render(mapElem, dt);
+                }
+            }
+            foreach (var key in expiredPings)
+            {
+                activePings.Remove(key);
+            }
         }
 
         public override void OnMouseMoveClient(MouseEvent args, GuiElementMap mapElem, StringBuilder hoverText)
@@ -145,6 +165,50 @@ namespace VSBuddyBeacon
             {
                 comp.OnMouseMove(args, mapElem, hoverText);
             }
+
+            // Check ping hover
+            foreach (var ping in activePings.Values)
+            {
+                ping.OnMouseMove(args, mapElem, hoverText);
+            }
+        }
+
+        public override void OnMouseUpClient(MouseEvent args, GuiElementMap mapElem)
+        {
+            if (!Active) return;
+
+            // Middle click to ping
+            if (args.Button == EnumMouseButton.Middle)
+            {
+                // Convert view position to world position
+                float relX = (float)(args.X - mapElem.Bounds.renderX);
+                float relY = (float)(args.Y - mapElem.Bounds.renderY);
+
+                var bounds = mapElem.CurrentBlockViewBounds;
+                double boundsWidth = bounds.X2 - bounds.X1;
+                double boundsHeight = bounds.Z2 - bounds.Z1;
+
+                double worldX = bounds.X1 + (relX / mapElem.Bounds.OuterWidth) * boundsWidth;
+                double worldZ = bounds.Z1 + (relY / mapElem.Bounds.OuterHeight) * boundsHeight;
+
+                // Send ping to server
+                var modSystem = capi.ModLoader.GetModSystem<VSBuddyBeaconModSystem>();
+                modSystem?.SendMapPing(worldX, worldZ);
+
+                args.Handled = true;
+            }
+        }
+
+        public void AddPing(string senderName, double posX, double posZ, long timestamp)
+        {
+            // Replace existing ping from same sender (only 1 ping per person visible)
+            if (activePings.TryGetValue(senderName, out var existingPing))
+            {
+                existingPing.Dispose();
+            }
+
+            var ping = new PingMapComponent(capi, senderName, posX, posZ, timestamp);
+            activePings[senderName] = ping;
         }
 
         public override void Dispose()
@@ -154,6 +218,12 @@ namespace VSBuddyBeacon
                 comp?.Dispose();
             }
             buddyComponents.Clear();
+
+            foreach (var ping in activePings.Values)
+            {
+                ping?.Dispose();
+            }
+            activePings.Clear();
 
             foreach (var texture in buddyTextures.Values)
             {
