@@ -12,6 +12,12 @@ namespace VSBuddyBeacon
         public long ServerTimestamp { get; set; }      // Server's ElapsedMilliseconds when position was captured
         public long ClientReceivedTime { get; set; }   // Client's ElapsedMilliseconds when packet was received
 
+        // RPG stats
+        public float Health { get; set; }
+        public float MaxHealth { get; set; }
+        public float Saturation { get; set; }
+        public float MaxSaturation { get; set; }
+
         /// <summary>
         /// Calculate age in seconds based on current client time
         /// </summary>

@@ -11,6 +11,7 @@ namespace VSBuddyBeacon
         public string PlayerName { get; set; }
         public Vec3d Position { get; set; }
         public long ClientReceivedTime { get; set; }  // Track when we last received an update
+        public LoadedTexture CustomTexture { get; set; }  // Custom texture for pinned players
 
         private ICoreClientAPI capi;
         private System.Collections.Generic.Dictionary<StalenessLevel, LoadedTexture> textures;
@@ -57,22 +58,31 @@ namespace VSBuddyBeacon
             if (staleness == StalenessLevel.Expired)
                 return;
 
-            // Get texture for current staleness level
-            if (!textures.TryGetValue(staleness, out var currentTexture))
+            // Use custom texture if available (pinned player), otherwise staleness-based
+            LoadedTexture currentTexture = CustomTexture;
+            if (currentTexture == null && !textures.TryGetValue(staleness, out currentTexture))
                 return;
 
             mapElem.TranslateWorldPosToViewPos(Position, ref viewPos);
 
-            float x = viewPos.X;
-            float y = viewPos.Y;
+            float mapWidth = (float)mapElem.Bounds.OuterWidth;
+            float mapHeight = (float)mapElem.Bounds.OuterHeight;
+            float size = (float)GuiElement.scaled(16);
 
-            // Check if position is visible on map
-            if (x < -10 || y < -10 || x > mapElem.Bounds.OuterWidth + 10 || y > mapElem.Bounds.OuterHeight + 10)
+            bool isOutside = viewPos.X < -10 || viewPos.Y < -10 || viewPos.X > mapWidth + 10 || viewPos.Y > mapHeight + 10;
+
+            // If outside and pinned (has custom texture), use ClampButPreserveAngle like VS waypoints
+            if (isOutside)
             {
-                return;
+                if (CustomTexture == null) return;  // Only show edge markers for pinned buddies
+
+                // Use VS's built-in method to clamp while preserving the angle from center
+                mapElem.ClampButPreserveAngle(ref viewPos, 2);
             }
 
-            float size = (float)GuiElement.scaled(16);
+            // Additional clamping to ensure within bounds (like VS waypoints)
+            float x = (float)GameMath.Clamp(viewPos.X, 2, mapWidth - 2);
+            float y = (float)GameMath.Clamp(viewPos.Y, 2, mapHeight - 2);
 
             capi.Render.GlToggleBlend(true);
 

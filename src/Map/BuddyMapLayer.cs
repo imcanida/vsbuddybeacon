@@ -15,10 +15,66 @@ namespace VSBuddyBeacon
         private Dictionary<string, PingMapComponent> activePings = new Dictionary<string, PingMapComponent>();  // Key = sender name, only 1 ping per person
         private ICoreClientAPI capi;
         private Dictionary<StalenessLevel, LoadedTexture> buddyTextures = new Dictionary<StalenessLevel, LoadedTexture>();
+        private Dictionary<string, LoadedTexture> pinnedTextures = new Dictionary<string, LoadedTexture>();  // Custom colored textures for pinned buddies
+        private Dictionary<string, (double r, double g, double b)> pinnedPlayers = new Dictionary<string, (double r, double g, double b)>();
 
         public override string Title => "Buddy Beacons";
         public override EnumMapAppSide DataSide => EnumMapAppSide.Client;
         public override string LayerGroupCode => "buddybeacons";
+
+        /// <summary>
+        /// Controls whether map pinging is enabled (middle-click to ping)
+        /// </summary>
+        public bool PingsEnabled { get; set; } = true;
+
+        public void UpdatePinnedPlayers(Dictionary<string, (double r, double g, double b)> pinned)
+        {
+            // Dispose old pinned textures
+            foreach (var tex in pinnedTextures.Values)
+            {
+                tex?.Dispose();
+            }
+            pinnedTextures.Clear();
+
+            pinnedPlayers = pinned ?? new Dictionary<string, (double r, double g, double b)>();
+
+            // Create textures for pinned players
+            int size = (int)GuiElement.scaled(24);
+            foreach (var kvp in pinnedPlayers)
+            {
+                pinnedTextures[kvp.Key] = CreateColoredTexture(size, kvp.Value.r, kvp.Value.g, kvp.Value.b);
+            }
+        }
+
+        private LoadedTexture CreateColoredTexture(int size, double r, double g, double b)
+        {
+            ImageSurface surface = new ImageSurface(Format.Argb32, size, size);
+            Context ctx = new Context(surface);
+
+            ctx.SetSourceRGBA(0, 0, 0, 0);
+            ctx.Paint();
+
+            double cx = size / 2.0;
+            double cy = size / 2.0;
+            double radius = size / 2.0 - 2;
+
+            // White border
+            ctx.SetSourceRGBA(1, 1, 1, 1);
+            ctx.Arc(cx, cy, radius, 0, 2 * Math.PI);
+            ctx.Fill();
+
+            // Colored fill
+            ctx.SetSourceRGBA(r, g, b, 1);
+            ctx.Arc(cx, cy, radius - 2, 0, 2 * Math.PI);
+            ctx.Fill();
+
+            var texture = new LoadedTexture(capi, capi.Gui.LoadCairoTexture(surface, false), size / 2, size / 2);
+
+            ctx.Dispose();
+            surface.Dispose();
+
+            return texture;
+        }
 
         public BuddyMapLayer(ICoreAPI api, IWorldMapManager mapSink) : base(api, mapSink)
         {
@@ -100,15 +156,22 @@ namespace VSBuddyBeacon
 
                 currentBuddies.Add(buddy.Name);
 
+                // Check if this buddy is pinned and has a custom texture
+                LoadedTexture pinnedTexture = null;
+                pinnedTextures.TryGetValue(buddy.Name, out pinnedTexture);
+
                 if (buddyComponents.TryGetValue(buddy.Name, out var existing))
                 {
                     // Update existing - pass the received time so it can track staleness
                     existing.UpdatePosition(buddy.Position, buddy.ClientReceivedTime);
+                    existing.CustomTexture = pinnedTexture;  // Update custom texture (may be null)
                 }
                 else
                 {
                     // Create new - pass received time instead of staleness level
-                    buddyComponents[buddy.Name] = new BuddyMapComponent(capi, buddyTextures, buddy.Name, buddy.Position, buddy.ClientReceivedTime);
+                    var comp = new BuddyMapComponent(capi, buddyTextures, buddy.Name, buddy.Position, buddy.ClientReceivedTime);
+                    comp.CustomTexture = pinnedTexture;
+                    buddyComponents[buddy.Name] = comp;
                 }
             }
 
@@ -177,8 +240,8 @@ namespace VSBuddyBeacon
         {
             if (!Active) return;
 
-            // Middle click to ping
-            if (args.Button == EnumMouseButton.Middle)
+            // Middle click to ping (if enabled)
+            if (args.Button == EnumMouseButton.Middle && PingsEnabled)
             {
                 // Convert view position to world position
                 float relX = (float)(args.X - mapElem.Bounds.renderX);
@@ -230,6 +293,12 @@ namespace VSBuddyBeacon
                 texture?.Dispose();
             }
             buddyTextures.Clear();
+
+            foreach (var texture in pinnedTextures.Values)
+            {
+                texture?.Dispose();
+            }
+            pinnedTextures.Clear();
 
             base.Dispose();
         }

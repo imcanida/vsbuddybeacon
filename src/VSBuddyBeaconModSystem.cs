@@ -40,11 +40,20 @@ namespace VSBuddyBeacon
         private GuiDialogPlayerSelect playerSelectDialog;
         private GuiDialogTeleportPrompt teleportPromptDialog;
         private GuiDialogBeaconCode beaconCodeDialog;
+        private HudElementPartyList partyListHud;
         private HudElementBuddyCompass buddyCompassHud;
         private BuddyMapLayer buddyMapLayer;
 
+        // Fake buddy testing
+        private bool fakeBuddiesActive = false;
+        private List<Vec3d> fakeBuddyPositions = null;
+        private long fakeBuddyTickId = 0;
+
         // Server-side reference
         private ICoreServerAPI sapi;
+
+        // Server-side: Track fake buddy entities for cleanup
+        private List<long> fakeBuddyEntityIds = new List<long>();
 
         // Configuration
         private ModConfig config;
@@ -372,12 +381,18 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<BeaconPositionPacket>()
                 .RegisterMessageType<SilencePlayerPacket>()
                 .RegisterMessageType<MapPingPacket>()
+                .RegisterMessageType<FakeBuddySpawnPacket>()
+                .RegisterMessageType<FakeBuddyClearPacket>()
+                .RegisterMessageType<BuddyChatPacket>()
                 .SetMessageHandler<TeleportRequestPacket>(OnTeleportRequestReceived)
                 .SetMessageHandler<TeleportResponsePacket>(OnTeleportResponseReceived)
                 .SetMessageHandler<PlayerListRequestPacket>(OnPlayerListRequest)
                 .SetMessageHandler<BeaconCodeSetPacket>(OnBeaconCodeSet)
                 .SetMessageHandler<SilencePlayerPacket>(OnSilencePlayer)
-                .SetMessageHandler<MapPingPacket>(OnMapPingReceived);
+                .SetMessageHandler<MapPingPacket>(OnMapPingReceived)
+                .SetMessageHandler<FakeBuddySpawnPacket>(OnFakeBuddySpawn)
+                .SetMessageHandler<FakeBuddyClearPacket>(OnFakeBuddyClear)
+                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived);
 
             // Configure recipes after assets load - will be called via AssetsFinalize override
 
@@ -419,11 +434,15 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<BeaconPositionPacket>()
                 .RegisterMessageType<SilencePlayerPacket>()
                 .RegisterMessageType<MapPingPacket>()
+                .RegisterMessageType<FakeBuddySpawnPacket>()
+                .RegisterMessageType<FakeBuddyClearPacket>()
+                .RegisterMessageType<BuddyChatPacket>()
                 .SetMessageHandler<TeleportPromptPacket>(OnTeleportPromptReceived)
                 .SetMessageHandler<TeleportResultPacket>(OnTeleportResultReceived)
                 .SetMessageHandler<PlayerListResponsePacket>(OnPlayerListReceived)
                 .SetMessageHandler<BeaconPositionPacket>(OnBeaconPositionsReceived)
-                .SetMessageHandler<MapPingPacket>(OnMapPingReceived);
+                .SetMessageHandler<MapPingPacket>(OnMapPingReceived)
+                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived);
 
             // Create buddy compass HUD and register it properly
             buddyCompassHud = new HudElementBuddyCompass(capi);
@@ -434,9 +453,98 @@ namespace VSBuddyBeacon
             if (worldMapManager != null)
             {
                 buddyMapLayer = new BuddyMapLayer(api, worldMapManager);
+                buddyMapLayer.PingsEnabled = config.EnableMapPings;
                 worldMapManager.MapLayers.Add(buddyMapLayer);
                 api.Logger.Notification("[VSBuddyBeacon] Buddy map layer registered");
             }
+
+            // Create party list HUD and register hotkey (if enabled)
+            if (config.EnablePartyList)
+            {
+                partyListHud = new HudElementPartyList(capi);
+
+                // Load persisted settings
+                partyListHud.LoadSettings(
+                    config.PartyListScale,
+                    new Dictionary<string, int>(config.PinnedPlayers),
+                    (scale, pins) =>
+                    {
+                        config.PartyListScale = scale;
+                        config.PinnedPlayers = pins;
+                        capi.StoreModConfig(config, "vsbuddybeacon.json");
+                    }
+                );
+
+                capi.Gui.LoadedGuis.Add(partyListHud);
+
+                // Connect pinned players changes to map layer
+                partyListHud.OnPinnedPlayersChanged = () =>
+                {
+                    var pinnedColors = partyListHud.GetPinnedPlayersWithColors();
+                    buddyMapLayer?.UpdatePinnedPlayers(pinnedColors);
+                };
+
+                // Initial sync of persisted pins to map layer
+                var initialPinnedColors = partyListHud.GetPinnedPlayersWithColors();
+                buddyMapLayer?.UpdatePinnedPlayers(initialPinnedColors);
+
+                capi.Input.RegisterHotKey("partylist", "Toggle Party List", GlKeys.P, HotkeyType.GUIOrOtherControls);
+                capi.Input.SetHotKeyHandler("partylist", (keyComb) =>
+                {
+                    partyListHud.ToggleVisibility();
+                    string status = partyListHud.IsVisible ? "shown" : "hidden";
+                    capi.ShowChatMessage($"[BuddyBeacon] Party list {status}");
+                    return true;
+                });
+            }
+
+            // Register /psay and /gsay chat commands for beacon chat
+            api.RegisterCommand("psay", "Send a message to pinned party members", "[message]", (int groupId, CmdArgs args) =>
+            {
+                string message = args.PopAll();
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    capi.ShowChatMessage("Usage: /psay <message>");
+                    return;
+                }
+
+                var pinnedNames = partyListHud?.GetPinnedPlayersWithColors()?.Keys.ToArray();
+                if (pinnedNames == null || pinnedNames.Length == 0)
+                {
+                    capi.ShowChatMessage("No party members pinned. Pin buddies in the party list first (press P).");
+                    return;
+                }
+
+                capi.Network.GetChannel(ChannelName).SendPacket(new BuddyChatPacket
+                {
+                    SenderName = capi.World.Player.PlayerName,
+                    Message = message,
+                    TargetNames = pinnedNames,
+                    IsPartyChat = true
+                });
+
+                capi.ShowChatMessage($"<strong>[Party] {capi.World.Player.PlayerName}:</strong> {message}");
+            });
+
+            api.RegisterCommand("gsay", "Send a message to all beacon group members", "[message]", (int groupId, CmdArgs args) =>
+            {
+                string message = args.PopAll();
+                if (string.IsNullOrWhiteSpace(message))
+                {
+                    capi.ShowChatMessage("Usage: /gsay <message>");
+                    return;
+                }
+
+                capi.Network.GetChannel(ChannelName).SendPacket(new BuddyChatPacket
+                {
+                    SenderName = capi.World.Player.PlayerName,
+                    Message = message,
+                    TargetNames = null,
+                    IsPartyChat = false
+                });
+
+                capi.ShowChatMessage($"<strong>[Group] {capi.World.Player.PlayerName}:</strong> {message}");
+            });
 
             // Register test command to simulate teleport requests (for testing dialog z-order)
             api.RegisterCommand("buddytest", "Test buddy beacon dialog", "", (int groupId, CmdArgs args) =>
@@ -455,7 +563,151 @@ namespace VSBuddyBeacon
                 capi.ShowChatMessage("[BuddyTest] Teleport prompt opened for testing");
             });
 
+            // Register test command to simulate fake buddies for party list testing
+            api.RegisterCommand("buddyfake", "Add fake buddies for testing (persists until .buddyclear)", "", (int groupId, CmdArgs args) =>
+            {
+                var playerPos = capi.World.Player.Entity.Pos.XYZ;
+                var random = new Random();
+
+                string[] names = { "FakePlayer1", "FakePlayer2", "FakePlayer3" };
+
+                // Store fixed positions for fake buddies
+                fakeBuddyPositions = new List<Vec3d>
+                {
+                    new Vec3d(playerPos.X + random.Next(-500, 500), playerPos.Y + random.Next(-20, 20), playerPos.Z + random.Next(-500, 500)),
+                    new Vec3d(playerPos.X + random.Next(-1000, 1000), playerPos.Y + random.Next(-50, 50), playerPos.Z + random.Next(-1000, 1000)),
+                    new Vec3d(playerPos.X + random.Next(-2000, 2000), playerPos.Y + random.Next(-100, 100), playerPos.Z + random.Next(-2000, 2000))
+                };
+                fakeBuddiesActive = true;
+
+                // Send spawn request to server for visual entities
+                capi.Network.GetChannel(ChannelName).SendPacket(new FakeBuddySpawnPacket
+                {
+                    PosX = fakeBuddyPositions.Select(p => p.X).ToArray(),
+                    PosY = fakeBuddyPositions.Select(p => p.Y).ToArray(),
+                    PosZ = fakeBuddyPositions.Select(p => p.Z).ToArray(),
+                    Names = names
+                });
+
+                // Start refresh timer if not already running
+                if (fakeBuddyTickId == 0)
+                {
+                    fakeBuddyTickId = capi.Event.RegisterGameTickListener(RefreshFakeBuddies, 1000);
+                }
+
+                RefreshFakeBuddies(0);
+                capi.ShowChatMessage("[BuddyTest] Added 3 persistent fake buddies with markers. Use .buddyclear to remove.");
+            });
+
+            // Command to clear fake buddies
+            api.RegisterCommand("buddyclear", "Clear fake buddies", "", (int groupId, CmdArgs args) =>
+            {
+                fakeBuddiesActive = false;
+                fakeBuddyPositions = null;
+                if (fakeBuddyTickId != 0)
+                {
+                    capi.Event.UnregisterGameTickListener(fakeBuddyTickId);
+                    fakeBuddyTickId = 0;
+                }
+
+                // Send clear request to server to despawn entities
+                capi.Network.GetChannel(ChannelName).SendPacket(new FakeBuddyClearPacket());
+
+                buddyCompassHud?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
+                buddyMapLayer?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
+                partyListHud?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
+                capi.ShowChatMessage("[BuddyTest] Fake buddies cleared.");
+            });
+
+            // Command to test receiving chat messages
+            api.RegisterCommand("buddychattest", "Simulate receiving group/party chat", "", (int groupId, CmdArgs args) =>
+            {
+                // Simulate receiving a group message
+                OnBuddyChatReceived(new BuddyChatPacket
+                {
+                    SenderName = "FakePlayer1",
+                    Message = "Hey! Found some copper ore over here!",
+                    IsPartyChat = false
+                });
+
+                // Small delay then party message
+                capi.Event.RegisterCallback((dt) =>
+                {
+                    OnBuddyChatReceived(new BuddyChatPacket
+                    {
+                        SenderName = "FakePlayer2",
+                        Message = "On my way! Wait for me.",
+                        IsPartyChat = true
+                    });
+                }, 500);
+
+                // Another group message
+                capi.Event.RegisterCallback((dt) =>
+                {
+                    OnBuddyChatReceived(new BuddyChatPacket
+                    {
+                        SenderName = "FakePlayer3",
+                        Message = "Nice find! I'll bring the pickaxes.",
+                        IsPartyChat = false
+                    });
+                }, 1200);
+
+                capi.ShowChatMessage("[BuddyTest] Simulating incoming chat messages...");
+            });
+
             api.Logger.Notification("[VSBuddyBeacon] Client-side initialized");
+        }
+
+        /// <summary>
+        /// Refreshes fake buddy data with fresh timestamps so they don't expire
+        /// </summary>
+        private void RefreshFakeBuddies(float dt)
+        {
+            if (!fakeBuddiesActive || fakeBuddyPositions == null || capi?.World?.Player == null)
+                return;
+
+            long currentTime = capi.World.ElapsedMilliseconds;
+
+            var fakeBuddies = new List<BuddyPositionWithTimestamp>
+            {
+                new BuddyPositionWithTimestamp
+                {
+                    Name = "FakePlayer1",
+                    Position = fakeBuddyPositions[0],
+                    ServerTimestamp = currentTime,
+                    ClientReceivedTime = currentTime,
+                    Health = 18f,
+                    MaxHealth = 20f,
+                    Saturation = 1100f,
+                    MaxSaturation = 1200f
+                },
+                new BuddyPositionWithTimestamp
+                {
+                    Name = "FakePlayer2",
+                    Position = fakeBuddyPositions[1],
+                    ServerTimestamp = currentTime,
+                    ClientReceivedTime = currentTime,
+                    Health = 12f,
+                    MaxHealth = 25f,
+                    Saturation = 400f,
+                    MaxSaturation = 1200f
+                },
+                new BuddyPositionWithTimestamp
+                {
+                    Name = "FakePlayer3",
+                    Position = fakeBuddyPositions[2],
+                    ServerTimestamp = currentTime,
+                    ClientReceivedTime = currentTime,
+                    Health = 18f,
+                    MaxHealth = 22f,
+                    Saturation = 1100f,
+                    MaxSaturation = 1200f
+                }
+            };
+
+            buddyCompassHud?.UpdateBuddyPositions(fakeBuddies);
+            buddyMapLayer?.UpdateBuddyPositions(fakeBuddies);
+            partyListHud?.UpdateBuddyPositions(fakeBuddies);
         }
 
         #region Server-side Beacon Handlers
@@ -611,6 +863,30 @@ namespace VSBuddyBeacon
             return null;
         }
 
+        private float GetPlayerHealth(IServerPlayer player)
+        {
+            var healthBehavior = player.Entity?.GetBehavior<EntityBehaviorHealth>();
+            return healthBehavior?.Health ?? 0f;
+        }
+
+        private float GetPlayerMaxHealth(IServerPlayer player)
+        {
+            var healthBehavior = player.Entity?.GetBehavior<EntityBehaviorHealth>();
+            return healthBehavior?.MaxHealth ?? 15f;
+        }
+
+        private float GetPlayerSaturation(IServerPlayer player)
+        {
+            var hungerBehavior = player.Entity?.GetBehavior<EntityBehaviorHunger>();
+            return hungerBehavior?.Saturation ?? 0f;
+        }
+
+        private float GetPlayerMaxSaturation(IServerPlayer player)
+        {
+            var hungerBehavior = player.Entity?.GetBehavior<EntityBehaviorHunger>();
+            return hungerBehavior?.MaxSaturation ?? 1200f;
+        }
+
         private void BroadcastBeaconPositions(float dt)
         {
             long currentTime = sapi.World.ElapsedMilliseconds;  // Capture timestamp once for consistency
@@ -669,7 +945,11 @@ namespace VSBuddyBeacon
                         PosX = others.Select(p => p.Entity.Pos.X).ToArray(),
                         PosY = others.Select(p => p.Entity.Pos.Y).ToArray(),
                         PosZ = others.Select(p => p.Entity.Pos.Z).ToArray(),
-                        Timestamps = others.Select(_ => currentTime).ToArray()
+                        Timestamps = others.Select(_ => currentTime).ToArray(),
+                        Health = others.Select(p => GetPlayerHealth(p)).ToArray(),
+                        MaxHealth = others.Select(p => GetPlayerMaxHealth(p)).ToArray(),
+                        Saturation = others.Select(p => GetPlayerSaturation(p)).ToArray(),
+                        MaxSaturation = others.Select(p => GetPlayerMaxSaturation(p)).ToArray()
                     };
 
                     LogDebug(sapi, $"[VSBuddyBeacon] Sending {others.Count} buddy positions to {recipient.PlayerName}");
@@ -680,6 +960,13 @@ namespace VSBuddyBeacon
 
         private void OnMapPingReceived(IServerPlayer fromPlayer, MapPingPacket packet)
         {
+            // Check if pings are enabled
+            if (!config.EnableMapPings)
+            {
+                LogDebug(sapi, $"[VSBuddyBeacon] Ping from {fromPlayer.PlayerName} rejected - pings disabled in config");
+                return;
+            }
+
             long currentTime = sapi.World.ElapsedMilliseconds;
 
             // Rate limiting: max 3 pings per 10 seconds
@@ -758,6 +1045,157 @@ namespace VSBuddyBeacon
             }
 
             LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} pinged at ({packet.PosX:F0}, {packet.PosZ:F0}) - sent to {groupMembers.Count} group members");
+        }
+
+        private void OnFakeBuddySpawn(IServerPlayer fromPlayer, FakeBuddySpawnPacket packet)
+        {
+            // First clear any existing fake buddies
+            ClearFakeBuddyEntities();
+
+            if (packet.PosX == null || packet.Names == null) return;
+
+            // Spawn armor stands (or straw dummies) at each position
+            for (int i = 0; i < packet.PosX.Length && i < packet.Names.Length; i++)
+            {
+                try
+                {
+                    // Try to spawn a straw dummy (training target) - looks like a person
+                    var entityType = sapi.World.GetEntityType(new AssetLocation("game:strawdummy"));
+                    if (entityType == null)
+                    {
+                        // Fallback to a chicken if straw dummy doesn't exist
+                        entityType = sapi.World.GetEntityType(new AssetLocation("game:chicken-rooster"));
+                    }
+
+                    if (entityType != null)
+                    {
+                        var entity = sapi.World.ClassRegistry.CreateEntity(entityType);
+                        entity.ServerPos.SetPos(packet.PosX[i], packet.PosY[i], packet.PosZ[i]);
+                        entity.Pos.SetFrom(entity.ServerPos);
+
+                        sapi.World.SpawnEntity(entity);
+                        fakeBuddyEntityIds.Add(entity.EntityId);
+
+                        LogDebug(sapi, $"[VSBuddyBeacon] Spawned fake buddy entity '{packet.Names[i]}' at ({packet.PosX[i]:F0}, {packet.PosY[i]:F0}, {packet.PosZ[i]:F0})");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    sapi.Logger.Warning($"[VSBuddyBeacon] Failed to spawn fake buddy entity: {ex.Message}");
+                }
+            }
+
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} spawned {fakeBuddyEntityIds.Count} fake buddy entities");
+        }
+
+        private void OnFakeBuddyClear(IServerPlayer fromPlayer, FakeBuddyClearPacket packet)
+        {
+            int count = ClearFakeBuddyEntities();
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} cleared {count} fake buddy entities");
+        }
+
+        private int ClearFakeBuddyEntities()
+        {
+            int count = 0;
+            foreach (var entityId in fakeBuddyEntityIds)
+            {
+                var entity = sapi.World.GetEntityById(entityId);
+                if (entity != null)
+                {
+                    entity.Die(EnumDespawnReason.Removed);
+                    count++;
+                }
+            }
+            fakeBuddyEntityIds.Clear();
+            return count;
+        }
+
+        private void OnBuddyChatReceived(IServerPlayer fromPlayer, BuddyChatPacket packet)
+        {
+            if (string.IsNullOrWhiteSpace(packet.Message)) return;
+
+            // Find sender's beacon code
+            string senderCode = null;
+            if (playerBeaconCodes.TryGetValue(fromPlayer.PlayerUID, out string manualCode))
+            {
+                senderCode = manualCode;
+            }
+            if (string.IsNullOrEmpty(senderCode))
+            {
+                senderCode = GetPlayerBeaconCode(fromPlayer);
+            }
+
+            if (string.IsNullOrEmpty(senderCode))
+            {
+                // Sender has no beacon code - can't send group/party chat
+                SendResult(fromPlayer, false, "You need an active beacon band to use group/party chat.");
+                return;
+            }
+
+            // Find all players in the same beacon group
+            var groupMembers = new List<IServerPlayer>();
+            foreach (var player in sapi.World.AllOnlinePlayers.OfType<IServerPlayer>())
+            {
+                if (player?.Entity == null || player.PlayerUID == fromPlayer.PlayerUID) continue;
+
+                string playerCode = null;
+                if (playerBeaconCodes.TryGetValue(player.PlayerUID, out string code))
+                {
+                    playerCode = code;
+                }
+                if (string.IsNullOrEmpty(playerCode))
+                {
+                    playerCode = GetPlayerBeaconCode(player);
+                }
+
+                if (playerCode == senderCode)
+                {
+                    groupMembers.Add(player);
+                }
+            }
+
+            // Determine recipients based on chat type
+            List<IServerPlayer> recipients;
+            if (packet.IsPartyChat && packet.TargetNames != null && packet.TargetNames.Length > 0)
+            {
+                // Party chat - only send to specified targets that are in the group
+                var targetSet = new HashSet<string>(packet.TargetNames, StringComparer.OrdinalIgnoreCase);
+                recipients = groupMembers.Where(p => targetSet.Contains(p.PlayerName)).ToList();
+
+                if (recipients.Count == 0)
+                {
+                    SendResult(fromPlayer, false, "None of your pinned party members are in your beacon group.");
+                    return;
+                }
+            }
+            else
+            {
+                // Group chat - send to all group members
+                recipients = groupMembers;
+
+                if (recipients.Count == 0)
+                {
+                    SendResult(fromPlayer, false, "No other players in your beacon group.");
+                    return;
+                }
+            }
+
+            // Create outgoing packet (use sender's name from server for security)
+            var outPacket = new BuddyChatPacket
+            {
+                SenderName = fromPlayer.PlayerName,
+                Message = packet.Message,
+                IsPartyChat = packet.IsPartyChat
+            };
+
+            // Send to all recipients
+            foreach (var recipient in recipients)
+            {
+                sapi.Network.GetChannel(ChannelName).SendPacket(outPacket, recipient);
+            }
+
+            string chatType = packet.IsPartyChat ? "party" : "group";
+            LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} sent {chatType} message to {recipients.Count} players");
         }
 
         #endregion
@@ -1150,18 +1588,32 @@ namespace VSBuddyBeacon
                     Name = packet.PlayerNames[i],
                     Position = new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i]),
                     ServerTimestamp = serverTimestamp,
-                    ClientReceivedTime = clientReceiveTime
+                    ClientReceivedTime = clientReceiveTime,
+                    Health = packet.Health != null && i < packet.Health.Length ? packet.Health[i] : 0f,
+                    MaxHealth = packet.MaxHealth != null && i < packet.MaxHealth.Length ? packet.MaxHealth[i] : 15f,
+                    Saturation = packet.Saturation != null && i < packet.Saturation.Length ? packet.Saturation[i] : 0f,
+                    MaxSaturation = packet.MaxSaturation != null && i < packet.MaxSaturation.Length ? packet.MaxSaturation[i] : 1200f
                 });
             }
 
             buddyCompassHud?.UpdateBuddyPositions(positions);
             buddyMapLayer?.UpdateBuddyPositions(positions);
+            partyListHud?.UpdateBuddyPositions(positions);
         }
 
         private void OnMapPingReceived(MapPingPacket packet)
         {
+            // Don't show pings if disabled in config
+            if (!config.EnableMapPings) return;
+
             long clientTime = capi.World.ElapsedMilliseconds;
             buddyMapLayer?.AddPing(packet.SenderName, packet.PosX, packet.PosZ, clientTime);
+        }
+
+        private void OnBuddyChatReceived(BuddyChatPacket packet)
+        {
+            string chatType = packet.IsPartyChat ? "Party" : "Group";
+            capi.ShowChatMessage($"<strong>[{chatType}] {packet.SenderName}:</strong> {packet.Message}");
         }
 
         #endregion

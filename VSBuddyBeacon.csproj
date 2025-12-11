@@ -57,4 +57,5 @@
 
     <Message Importance="high" Text="VS Buddy Beacon packaged to: $(ZipFile)" />
   </Target>
+  <ProjectExtensions><VisualStudio><UserProperties modinfo_1json__JsonSchema="https://changie.dev/schema.json" /></VisualStudio></ProjectExtensions>
 </Project>

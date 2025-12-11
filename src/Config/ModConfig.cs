@@ -6,6 +6,28 @@ namespace VSBuddyBeacon.Config
     {
         public bool VerboseLogging { get; set; } = false;
 
+        /// <summary>
+        /// Enable the Party List HUD (press P to toggle). If disabled, party list UI won't be created.
+        /// Note: Beacon positions are still sent for compass/map features - this only hides the party UI.
+        /// </summary>
+        public bool EnablePartyList { get; set; } = true;
+
+        /// <summary>
+        /// Enable map pinging (middle-click on map to ping location to party members).
+        /// If disabled on server, all pings are rejected. If disabled on client, ping UI is hidden.
+        /// </summary>
+        public bool EnableMapPings { get; set; } = true;
+
+        /// <summary>
+        /// Party list UI scale (0.9 to 1.5)
+        /// </summary>
+        public float PartyListScale { get; set; } = 1.0f;
+
+        /// <summary>
+        /// Pinned players with their color indices
+        /// </summary>
+        public Dictionary<string, int> PinnedPlayers { get; set; } = new Dictionary<string, int>();
+
         public Dictionary<string, ItemConfig> Items { get; set; } = new Dictionary<string, ItemConfig>
         {
             ["wayfindercompass"] = new ItemConfig(),
