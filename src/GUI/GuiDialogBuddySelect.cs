@@ -9,11 +9,14 @@ namespace VSBuddyBeacon
     public class GuiDialogBuddySelect : GuiDialog
     {
         private string[] allNames = Array.Empty<string>();
+        private string[] allUids = Array.Empty<string>();
         private string[] filteredNames = Array.Empty<string>();
+        private string[] filteredUids = Array.Empty<string>();
         private string selectedName = null;
+        private string selectedUid = null;
         private string searchText = "";
         private int selectedColorIndex = 0;
-        private readonly Action<string, int> onConfirm;
+        private readonly Action<string, string, int> onConfirm;  // (name, uid, colorIndex)
         private readonly HashSet<int> usedColorIndices;
 
         public static readonly (double r, double g, double b)[] PinColors = new[]
@@ -31,16 +34,19 @@ namespace VSBuddyBeacon
         public override string ToggleKeyCombinationCode => null;
         public override double DrawOrder => 0.9;
 
-        public GuiDialogBuddySelect(ICoreClientAPI capi, string[] buddyNames, HashSet<int> usedColors, Action<string, int> onConfirmCallback) : base(capi)
+        public GuiDialogBuddySelect(ICoreClientAPI capi, string[] buddyNames, string[] buddyUids, HashSet<int> usedColors, Action<string, string, int> onConfirmCallback) : base(capi)
         {
             allNames = buddyNames ?? Array.Empty<string>();
+            allUids = buddyUids ?? Array.Empty<string>();
             filteredNames = allNames;
+            filteredUids = allUids;
             usedColorIndices = usedColors ?? new HashSet<int>();
             onConfirm = onConfirmCallback;
 
             if (allNames.Length > 0)
             {
                 selectedName = allNames[0];
+                selectedUid = allUids.Length > 0 ? allUids[0] : null;
             }
 
             // Find first unused color
@@ -66,12 +72,12 @@ namespace VSBuddyBeacon
             var composer = capi.Gui
                 .CreateCompo("vsbuddybeacon-buddyselect", dialogBounds)
                 .AddShadedDialogBG(bgBounds)
-                .AddDialogTitleBar("Pin Buddy", () => TryClose())
+                .AddDialogTitleBar("Invite to Party", () => TryClose())
                 .BeginChildElements(bgBounds);
 
             if (allNames.Length == 0)
             {
-                composer.AddStaticText("No buddies available to pin",
+                composer.AddStaticText("No buddies available to invite",
                     CairoFont.WhiteSmallText().WithColor(new double[] { 0.6, 0.6, 0.6, 1 }),
                     ElementBounds.Fixed(15, 50, 310, 25));
 
@@ -151,15 +157,15 @@ namespace VSBuddyBeacon
                 y += 45;
 
                 // Buttons
-                bool canPin = filteredNames.Length > 0;
-                if (canPin)
+                bool canInvite = filteredNames.Length > 0;
+                if (canInvite)
                 {
-                    composer.AddSmallButton("Pin", OnConfirmClicked,
+                    composer.AddSmallButton("Invite", OnConfirmClicked,
                         ElementBounds.Fixed(70, y, 100, 28), EnumButtonStyle.Normal);
                 }
 
                 composer.AddSmallButton("Cancel", () => { TryClose(); return true; },
-                    ElementBounds.Fixed(canPin ? 190 : 120, y, 100, 28), EnumButtonStyle.Normal);
+                    ElementBounds.Fixed(canInvite ? 190 : 120, y, 100, 28), EnumButtonStyle.Normal);
             }
 
             SingleComposer = composer.EndChildElements().Compose();
@@ -175,16 +181,24 @@ namespace VSBuddyBeacon
         {
             searchText = text ?? "";
 
-            // Filter names
+            // Filter names and UIDs together
             if (string.IsNullOrWhiteSpace(searchText))
             {
                 filteredNames = allNames;
+                filteredUids = allUids;
             }
             else
             {
-                filteredNames = allNames
-                    .Where(n => n.IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0)
-                    .ToArray();
+                var indices = new List<int>();
+                for (int i = 0; i < allNames.Length; i++)
+                {
+                    if (allNames[i].IndexOf(searchText, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        indices.Add(i);
+                    }
+                }
+                filteredNames = indices.Select(i => allNames[i]).ToArray();
+                filteredUids = indices.Where(i => i < allUids.Length).Select(i => allUids[i]).ToArray();
             }
 
             // Update selection
@@ -193,11 +207,13 @@ namespace VSBuddyBeacon
                 if (!filteredNames.Contains(selectedName))
                 {
                     selectedName = filteredNames[0];
+                    selectedUid = filteredUids.Length > 0 ? filteredUids[0] : null;
                 }
             }
             else
             {
                 selectedName = null;
+                selectedUid = null;
             }
 
             // Recompose to update dropdown
@@ -244,6 +260,9 @@ namespace VSBuddyBeacon
         private void OnBuddyDropdownChanged(string code, bool selected)
         {
             selectedName = code;
+            // Find the corresponding UID
+            int index = Array.IndexOf(filteredNames, code);
+            selectedUid = (index >= 0 && index < filteredUids.Length) ? filteredUids[index] : null;
         }
 
         private bool OnColorClicked(int colorIndex)
@@ -268,7 +287,7 @@ namespace VSBuddyBeacon
                 return true;
             }
 
-            onConfirm?.Invoke(selectedName, selectedColorIndex);
+            onConfirm?.Invoke(selectedName, selectedUid, selectedColorIndex);
             TryClose();
             return true;
         }

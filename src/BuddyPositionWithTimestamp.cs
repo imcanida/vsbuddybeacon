@@ -8,6 +8,7 @@ namespace VSBuddyBeacon
     public class BuddyPositionWithTimestamp
     {
         public string Name { get; set; }
+        public string PlayerUid { get; set; }  // Player UID for party invites
         public Vec3d Position { get; set; }
         public long ServerTimestamp { get; set; }      // Server's ElapsedMilliseconds when position was captured
         public long ClientReceivedTime { get; set; }   // Client's ElapsedMilliseconds when packet was received

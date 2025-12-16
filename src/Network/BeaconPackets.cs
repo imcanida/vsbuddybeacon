@@ -38,6 +38,9 @@ namespace VSBuddyBeacon
 
         [ProtoMember(9)]
         public float[] MaxSaturation { get; set; }  // Max saturation
+
+        [ProtoMember(10)]
+        public string[] PlayerUids { get; set; }  // Player UIDs for party invites
     }
 
     [ProtoContract]

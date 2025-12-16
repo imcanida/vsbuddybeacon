@@ -35,14 +35,41 @@ namespace VSBuddyBeacon
         private const int MAX_PINGS_PER_WINDOW = 3;
         private const float PING_WINDOW_SECONDS = 10f;
 
+        // Server-side: Party tracking
+        private Dictionary<long, Party> parties = new();
+        private Dictionary<string, long> playerPartyMap = new();  // playerUid -> partyId
+        private long nextPartyId = 1;
+        private Dictionary<long, PendingPartyInvite> pendingPartyInvites = new();
+        private long nextPartyInviteId = 1;
+        private Dictionary<string, Dictionary<string, int>> partyInviteCounts = new();  // TargetUID -> (InviterUID -> Count)
+
+        // Server-side: Track last-sent beacon data for delta compression
+        // Key: "recipientUid:buddyUid", Value: last sent state
+        private Dictionary<string, LastSentBuddyState> lastSentStates = new();
+        // Players that need full state sync on next update (joined, reconnected, party changed)
+        private HashSet<string> playersNeedingFullSync = new();
+
         // Client-side references
         private ICoreClientAPI capi;
         private GuiDialogPlayerSelect playerSelectDialog;
         private GuiDialogTeleportPrompt teleportPromptDialog;
         private GuiDialogBeaconCode beaconCodeDialog;
+        private GuiDialogPartyInvitePrompt partyInvitePromptDialog;
         private HudElementPartyList partyListHud;
         private HudElementBuddyCompass buddyCompassHud;
         private BuddyMapLayer buddyMapLayer;
+
+        // Client-side: Party state received from server
+        private PartyStatePacket currentPartyState = null;
+
+        // Client-side: Cached buddy positions for staleness fade-out
+        // When someone goes offline, their position stays here and fades via staleness
+        private Dictionary<string, BuddyPositionWithTimestamp> cachedBuddyPositions = new();
+
+        // Test mode for party invites
+        private bool partyTestMode = false;
+        private string fakePartyMemberName = null;
+        private string fakePartyMemberUid = null;
 
         // Fake buddy testing
         private bool fakeBuddiesActive = false;
@@ -319,6 +346,48 @@ namespace VSBuddyBeacon
 
         private void OnPlayerFirstJoin(IServerPlayer player)
         {
+            // Mark player as needing full sync (they have no cached state on their client)
+            playersNeedingFullSync.Add(player.PlayerUID);
+
+            // Also mark all existing players to send full data to this new player
+            // (so this player gets everyone's current health immediately)
+            foreach (var p in sapi.World.AllOnlinePlayers.OfType<IServerPlayer>())
+            {
+                if (p.PlayerUID != player.PlayerUID)
+                {
+                    // Clear any cached state for this pair so new player gets fresh data
+                    var keysToRemove = lastSentStates.Keys
+                        .Where(k => k.StartsWith($"{player.PlayerUID}:"))
+                        .ToList();
+                    foreach (var key in keysToRemove)
+                    {
+                        lastSentStates.Remove(key);
+                    }
+                }
+            }
+
+            // Check if player is in a party and broadcast their online status
+            if (playerPartyMap.TryGetValue(player.PlayerUID, out long partyId) && parties.TryGetValue(partyId, out var party))
+            {
+                LogInfo(sapi, $"[VSBuddyBeacon] {player.PlayerName} reconnected to party {partyId}");
+
+                // If the original leader reconnects and someone else is acting leader, restore their leadership
+                if (party.OriginalLeaderUid == player.PlayerUID && party.LeaderUid != player.PlayerUID)
+                {
+                    party.LeaderUid = player.PlayerUID;
+                    LogInfo(sapi, $"[VSBuddyBeacon] Original leader {player.PlayerName} reclaimed leadership");
+                }
+
+                // Small delay to ensure player is fully initialized
+                sapi.Event.RegisterCallback((dt) =>
+                {
+                    if (parties.ContainsKey(partyId))  // Party still exists
+                    {
+                        BroadcastPartyState(party);
+                    }
+                }, 500);
+            }
+
             const string HAS_JOINED_KEY = "vsbuddybeacon:hasJoinedBefore";
 
             // Check if player has joined before
@@ -384,6 +453,16 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<FakeBuddySpawnPacket>()
                 .RegisterMessageType<FakeBuddyClearPacket>()
                 .RegisterMessageType<BuddyChatPacket>()
+                // Party packets
+                .RegisterMessageType<PartyInvitePacket>()
+                .RegisterMessageType<PartyInvitePromptPacket>()
+                .RegisterMessageType<PartyInviteResponsePacket>()
+                .RegisterMessageType<PartyStatePacket>()
+                .RegisterMessageType<PartyLeavePacket>()
+                .RegisterMessageType<PartyKickPacket>()
+                .RegisterMessageType<PartyMakeLeadPacket>()
+                .RegisterMessageType<PartyDisbandedPacket>()
+                .RegisterMessageType<PartyInviteResultPacket>()
                 .SetMessageHandler<TeleportRequestPacket>(OnTeleportRequestReceived)
                 .SetMessageHandler<TeleportResponsePacket>(OnTeleportResponseReceived)
                 .SetMessageHandler<PlayerListRequestPacket>(OnPlayerListRequest)
@@ -392,13 +471,22 @@ namespace VSBuddyBeacon
                 .SetMessageHandler<MapPingPacket>(OnMapPingReceived)
                 .SetMessageHandler<FakeBuddySpawnPacket>(OnFakeBuddySpawn)
                 .SetMessageHandler<FakeBuddyClearPacket>(OnFakeBuddyClear)
-                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived);
+                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived)
+                // Party handlers
+                .SetMessageHandler<PartyInvitePacket>(OnPartyInviteReceived)
+                .SetMessageHandler<PartyInviteResponsePacket>(OnPartyInviteResponseReceived)
+                .SetMessageHandler<PartyLeavePacket>(OnPartyLeaveReceived)
+                .SetMessageHandler<PartyKickPacket>(OnPartyKickReceived)
+                .SetMessageHandler<PartyMakeLeadPacket>(OnPartyMakeLeadReceived);
 
             // Configure recipes after assets load - will be called via AssetsFinalize override
 
             // Register tick handlers
             api.Event.RegisterGameTickListener(CheckRequestTimeouts, 1000);  // Every 1000ms
-            api.Event.RegisterGameTickListener(BroadcastBeaconPositions, (int)(BEACON_UPDATE_INTERVAL * 1000));
+            api.Event.RegisterGameTickListener(CheckPartyInviteTimeouts, 1000);  // Every 1000ms
+            // Use config interval, clamped to safe range (0.5s - 10s)
+            float beaconInterval = Math.Clamp(config.BeaconUpdateInterval, 0.5f, 10f);
+            api.Event.RegisterGameTickListener(BroadcastBeaconPositions, (int)(beaconInterval * 1000));
 
             // Clean up beacon codes when player disconnects
             api.Event.PlayerDisconnect += OnPlayerDisconnect;
@@ -437,12 +525,27 @@ namespace VSBuddyBeacon
                 .RegisterMessageType<FakeBuddySpawnPacket>()
                 .RegisterMessageType<FakeBuddyClearPacket>()
                 .RegisterMessageType<BuddyChatPacket>()
+                // Party packets
+                .RegisterMessageType<PartyInvitePacket>()
+                .RegisterMessageType<PartyInvitePromptPacket>()
+                .RegisterMessageType<PartyInviteResponsePacket>()
+                .RegisterMessageType<PartyStatePacket>()
+                .RegisterMessageType<PartyLeavePacket>()
+                .RegisterMessageType<PartyKickPacket>()
+                .RegisterMessageType<PartyMakeLeadPacket>()
+                .RegisterMessageType<PartyDisbandedPacket>()
+                .RegisterMessageType<PartyInviteResultPacket>()
                 .SetMessageHandler<TeleportPromptPacket>(OnTeleportPromptReceived)
                 .SetMessageHandler<TeleportResultPacket>(OnTeleportResultReceived)
                 .SetMessageHandler<PlayerListResponsePacket>(OnPlayerListReceived)
                 .SetMessageHandler<BeaconPositionPacket>(OnBeaconPositionsReceived)
                 .SetMessageHandler<MapPingPacket>(OnMapPingReceived)
-                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived);
+                .SetMessageHandler<BuddyChatPacket>(OnBuddyChatReceived)
+                // Party handlers
+                .SetMessageHandler<PartyInvitePromptPacket>(OnPartyInvitePromptReceived)
+                .SetMessageHandler<PartyStatePacket>(OnPartyStateReceived)
+                .SetMessageHandler<PartyDisbandedPacket>(OnPartyDisbandedReceived)
+                .SetMessageHandler<PartyInviteResultPacket>(OnPartyInviteResultReceived);
 
             // Create buddy compass HUD and register it properly
             buddyCompassHud = new HudElementBuddyCompass(capi);
@@ -655,6 +758,63 @@ namespace VSBuddyBeacon
                 capi.ShowChatMessage("[BuddyTest] Simulating incoming chat messages...");
             });
 
+            // Command to test party as LEADER (you can kick/make lead)
+            api.RegisterCommand("partytest", "Test party as leader (you can kick/make lead)", "", (int groupId, CmdArgs args) =>
+            {
+                partyTestMode = true;
+
+                // Create party directly without prompt - you're the leader
+                var myName = capi?.World?.Player?.PlayerName ?? "You";
+                var myUid = capi?.World?.Player?.PlayerUID ?? "your-uid";
+
+                var fakeState = new PartyStatePacket
+                {
+                    PartyId = 99999,
+                    LeaderUid = myUid,  // You are the leader
+                    LeaderName = myName,
+                    MemberUids = new[] { myUid, "fake-member-uid" },
+                    MemberNames = new[] { myName, "TestMember" }
+                };
+
+                OnPartyStateReceived(fakeState);
+                AddFakePartyMember("TestMember", "fake-member-uid");
+                capi.ShowChatMessage("[PartyTest] Created test party as LEADER. You can Kick/Make Lead on TestMember. Use .partyclear to reset.");
+            });
+
+            // Command to test party as MEMBER (you can only leave)
+            api.RegisterCommand("partytestmember", "Test party as member (you can only leave)", "", (int groupId, CmdArgs args) =>
+            {
+                partyTestMode = true;
+
+                // Create party directly - TestLeader is the leader, you're a member
+                var myName = capi?.World?.Player?.PlayerName ?? "You";
+                var myUid = capi?.World?.Player?.PlayerUID ?? "your-uid";
+
+                var fakeState = new PartyStatePacket
+                {
+                    PartyId = 99999,
+                    LeaderUid = "fake-leader-uid",  // TestLeader is the leader
+                    LeaderName = "TestLeader",
+                    MemberUids = new[] { "fake-leader-uid", myUid },
+                    MemberNames = new[] { "TestLeader", myName }
+                };
+
+                OnPartyStateReceived(fakeState);
+                AddFakePartyMember("TestLeader", "fake-leader-uid");
+                capi.ShowChatMessage("[PartyTest] Joined test party as MEMBER. TestLeader is the leader. You can only Leave. Use .partyclear to reset.");
+            });
+
+            // Command to clear test party state
+            api.RegisterCommand("partyclear", "Clear test party state", "", (int groupId, CmdArgs args) =>
+            {
+                partyTestMode = false;
+                fakePartyMemberName = null;
+                fakePartyMemberUid = null;
+                currentPartyState = null;
+                partyListHud?.ClearPartyState();
+                capi.ShowChatMessage("[PartyTest] Test party cleared.");
+            });
+
             api.Logger.Notification("[VSBuddyBeacon] Client-side initialized");
         }
 
@@ -666,13 +826,28 @@ namespace VSBuddyBeacon
             if (!fakeBuddiesActive || fakeBuddyPositions == null || capi?.World?.Player == null)
                 return;
 
-            long currentTime = capi.World.ElapsedMilliseconds;
+            // Use combined update to include party test member if active
+            UpdateAllFakeBuddies();
+        }
 
-            var fakeBuddies = new List<BuddyPositionWithTimestamp>
+        /// <summary>
+        /// Builds combined list of all fake buddies (from .buddyfake and .partytest) and updates HUDs
+        /// </summary>
+        private void UpdateAllFakeBuddies()
+        {
+            if (capi?.World?.Player == null) return;
+
+            long currentTime = capi.World.ElapsedMilliseconds;
+            var playerPos = capi.World.Player.Entity?.Pos?.XYZ;
+            var allFakeBuddies = new List<BuddyPositionWithTimestamp>();
+
+            // Add fake buddies from .buddyfake
+            if (fakeBuddiesActive && fakeBuddyPositions != null)
             {
-                new BuddyPositionWithTimestamp
+                allFakeBuddies.Add(new BuddyPositionWithTimestamp
                 {
                     Name = "FakePlayer1",
+                    PlayerUid = "fake-player1-uid",
                     Position = fakeBuddyPositions[0],
                     ServerTimestamp = currentTime,
                     ClientReceivedTime = currentTime,
@@ -680,10 +855,11 @@ namespace VSBuddyBeacon
                     MaxHealth = 20f,
                     Saturation = 1100f,
                     MaxSaturation = 1200f
-                },
-                new BuddyPositionWithTimestamp
+                });
+                allFakeBuddies.Add(new BuddyPositionWithTimestamp
                 {
                     Name = "FakePlayer2",
+                    PlayerUid = "fake-player2-uid",
                     Position = fakeBuddyPositions[1],
                     ServerTimestamp = currentTime,
                     ClientReceivedTime = currentTime,
@@ -691,10 +867,11 @@ namespace VSBuddyBeacon
                     MaxHealth = 25f,
                     Saturation = 400f,
                     MaxSaturation = 1200f
-                },
-                new BuddyPositionWithTimestamp
+                });
+                allFakeBuddies.Add(new BuddyPositionWithTimestamp
                 {
                     Name = "FakePlayer3",
+                    PlayerUid = "fake-player3-uid",
                     Position = fakeBuddyPositions[2],
                     ServerTimestamp = currentTime,
                     ClientReceivedTime = currentTime,
@@ -702,12 +879,32 @@ namespace VSBuddyBeacon
                     MaxHealth = 22f,
                     Saturation = 1100f,
                     MaxSaturation = 1200f
-                }
-            };
+                });
+            }
 
-            buddyCompassHud?.UpdateBuddyPositions(fakeBuddies);
-            buddyMapLayer?.UpdateBuddyPositions(fakeBuddies);
-            partyListHud?.UpdateBuddyPositions(fakeBuddies);
+            // Add fake party member from .partytest
+            if (partyTestMode && !string.IsNullOrEmpty(fakePartyMemberName) && playerPos != null)
+            {
+                allFakeBuddies.Add(new BuddyPositionWithTimestamp
+                {
+                    Name = fakePartyMemberName,
+                    PlayerUid = fakePartyMemberUid,
+                    Position = new Vec3d(playerPos.X + 10, playerPos.Y + 15, playerPos.Z + 10),
+                    ServerTimestamp = currentTime,
+                    ClientReceivedTime = currentTime,
+                    Health = 15f,
+                    MaxHealth = 15f,
+                    Saturation = 1000f,
+                    MaxSaturation = 1200f
+                });
+            }
+
+            if (allFakeBuddies.Count > 0)
+            {
+                buddyCompassHud?.UpdateBuddyPositions(allFakeBuddies);
+                buddyMapLayer?.UpdateBuddyPositions(allFakeBuddies);
+                partyListHud?.UpdateBuddyPositions(allFakeBuddies);
+            }
         }
 
         #region Server-side Beacon Handlers
@@ -821,6 +1018,48 @@ namespace VSBuddyBeacon
 
             // Clear ping rate limit tracking
             pingTimestamps.Remove(player.PlayerUID);
+
+            // Cancel pending party invites from this player
+            var invitesToCancel = pendingPartyInvites
+                .Where(kvp => kvp.Value.InviterUid == player.PlayerUID)
+                .Select(kvp => kvp.Key)
+                .ToList();
+            foreach (var id in invitesToCancel)
+            {
+                pendingPartyInvites.Remove(id);
+            }
+
+            // Clear party invite counts for this player
+            partyInviteCounts.Remove(player.PlayerUID);
+            foreach (var counts in partyInviteCounts.Values)
+            {
+                counts.Remove(player.PlayerUID);
+            }
+
+            // Handle party membership - broadcast offline status but keep in party
+            if (playerPartyMap.TryGetValue(player.PlayerUID, out long partyId) && parties.TryGetValue(partyId, out var party))
+            {
+                LogInfo(sapi, $"[VSBuddyBeacon] {player.PlayerName} disconnected from party {partyId} (staying in party)");
+
+                // If the current leader (original or acting) disconnects, promote next online member
+                if (party.LeaderUid == player.PlayerUID)
+                {
+                    var nextOnlineMember = party.MemberUids
+                        .Where(uid => uid != player.PlayerUID)
+                        .FirstOrDefault(uid => sapi.World.AllOnlinePlayers.Any(p => p.PlayerUID == uid));
+
+                    if (nextOnlineMember != null)
+                    {
+                        party.LeaderUid = nextOnlineMember;  // Acting leader (OriginalLeaderUid stays unchanged)
+                        var newLeader = sapi.World.AllOnlinePlayers.FirstOrDefault(p => p.PlayerUID == nextOnlineMember);
+                        LogInfo(sapi, $"[VSBuddyBeacon] Acting leadership transferred to {newLeader?.PlayerName ?? nextOnlineMember}");
+                    }
+                }
+
+                // Pass disconnecting player UID so they're marked offline immediately
+                // (they may still be in AllOnlinePlayers at this point)
+                BroadcastPartyState(party, disconnectingPlayerUid: player.PlayerUID);
+            }
         }
 
         /// <summary>
@@ -889,7 +1128,7 @@ namespace VSBuddyBeacon
 
         private void BroadcastBeaconPositions(float dt)
         {
-            long currentTime = sapi.World.ElapsedMilliseconds;  // Capture timestamp once for consistency
+            long currentTime = sapi.World.ElapsedMilliseconds;
 
             // Group players by beacon code (from worn/inventory items OR manual setting)
             var codeGroups = new Dictionary<string, List<IServerPlayer>>();
@@ -899,14 +1138,12 @@ namespace VSBuddyBeacon
                 if (player?.Entity == null) continue;
 
                 // Priority: playerBeaconCodes (instant) over item attributes (slow sync)
-                // This fixes race condition where code changes take 1-2s to sync via item attributes
                 string code = null;
                 if (playerBeaconCodes.TryGetValue(player.PlayerUID, out string manualCode))
                 {
-                    code = manualCode;  // Manual code takes precedence
+                    code = manualCode;
                 }
 
-                // Fall back to beacon band in inventory if no manual code set
                 if (string.IsNullOrEmpty(code))
                 {
                     code = GetPlayerBeaconCode(player);
@@ -920,40 +1157,188 @@ namespace VSBuddyBeacon
                 codeGroups[code].Add(player);
             }
 
-            // Debug: Log groups found
-            foreach (var kvp in codeGroups)
-            {
-                if (kvp.Value.Count >= 2)
-                {
-                    LogDebug(sapi, $"[VSBuddyBeacon] Beacon group '{kvp.Key}': {string.Join(", ", kvp.Value.Select(p => p.PlayerName))}");
-                }
-            }
+            // Config settings
+            int maxGroupSize = config.MaxBeaconGroupSize;
+            float posThreshold = config.PositionChangeThreshold;
+            var healthMode = config.HealthDataMode;
+            float healthThreshold = config.HealthChangeThreshold;
+            float satThreshold = config.SaturationChangeThreshold;
+            bool enableLod = config.EnableDistanceLod;
+            float lodNear = config.LodNearDistance;
+            float lodMid = config.LodMidDistance;
+            float baseIntervalMs = config.BeaconUpdateInterval * 1000f;
 
             // For each group with 2+ players, send positions to all members
             foreach (var group in codeGroups.Values)
             {
                 if (group.Count < 2) continue;
 
-                foreach (var recipient in group)
+                // Apply max group size limit if configured
+                var effectiveGroup = maxGroupSize > 0 && group.Count > maxGroupSize
+                    ? group.Take(maxGroupSize).ToList()
+                    : group;
+
+                foreach (var recipient in effectiveGroup)
                 {
+                    bool needsFullSync = playersNeedingFullSync.Contains(recipient.PlayerUID);
+
                     // Get other players in same group (not self)
-                    var others = group.Where(p => p.PlayerUID != recipient.PlayerUID).ToList();
+                    var others = effectiveGroup.Where(p => p.PlayerUID != recipient.PlayerUID).ToList();
 
-                    var packet = new BeaconPositionPacket
+                    // Build packet with delta compression
+                    var names = new List<string>();
+                    var uids = new List<string>();
+                    var posX = new List<double>();
+                    var posY = new List<double>();
+                    var posZ = new List<double>();
+                    var timestamps = new List<long>();
+                    var health = new List<float>();
+                    var maxHealth = new List<float>();
+                    var saturation = new List<float>();
+                    var maxSaturation = new List<float>();
+
+                    var recipientPos = recipient.Entity.Pos;
+
+                    foreach (var buddy in others)
                     {
-                        PlayerNames = others.Select(p => p.PlayerName).ToArray(),
-                        PosX = others.Select(p => p.Entity.Pos.X).ToArray(),
-                        PosY = others.Select(p => p.Entity.Pos.Y).ToArray(),
-                        PosZ = others.Select(p => p.Entity.Pos.Z).ToArray(),
-                        Timestamps = others.Select(_ => currentTime).ToArray(),
-                        Health = others.Select(p => GetPlayerHealth(p)).ToArray(),
-                        MaxHealth = others.Select(p => GetPlayerMaxHealth(p)).ToArray(),
-                        Saturation = others.Select(p => GetPlayerSaturation(p)).ToArray(),
-                        MaxSaturation = others.Select(p => GetPlayerMaxSaturation(p)).ToArray()
-                    };
+                        string stateKey = $"{recipient.PlayerUID}:{buddy.PlayerUID}";
+                        var buddyPos = buddy.Entity.Pos;
+                        float buddyHealth = GetPlayerHealth(buddy);
+                        float buddyMaxHealth = GetPlayerMaxHealth(buddy);
+                        float buddySat = GetPlayerSaturation(buddy);
+                        float buddyMaxSat = GetPlayerMaxSaturation(buddy);
 
-                    LogDebug(sapi, $"[VSBuddyBeacon] Sending {others.Count} buddy positions to {recipient.PlayerName}");
-                    sapi.Network.GetChannel(ChannelName).SendPacket(packet, recipient);
+                        // Check if we need to send this buddy's data
+                        bool sendPosition = needsFullSync;
+                        bool sendHealth = needsFullSync && healthMode != Config.HealthDataMode.Never;
+
+                        if (!needsFullSync)
+                        {
+                            // Distance-based LOD: check if enough time has passed based on distance tier
+                            if (enableLod && lastSentStates.TryGetValue(stateKey, out var lodState))
+                            {
+                                double dx = buddyPos.X - recipientPos.X;
+                                double dz = buddyPos.Z - recipientPos.Z;
+                                double distance = Math.Sqrt(dx * dx + dz * dz);
+
+                                // Determine minimum interval based on distance tier
+                                float minIntervalMs;
+                                if (distance < lodNear)
+                                {
+                                    minIntervalMs = baseIntervalMs;        // Full rate (1x)
+                                }
+                                else if (distance < lodMid)
+                                {
+                                    minIntervalMs = baseIntervalMs * 2f;   // Half rate (2x interval)
+                                }
+                                else
+                                {
+                                    minIntervalMs = baseIntervalMs * 4f;   // Quarter rate (4x interval)
+                                }
+
+                                // Skip this buddy if not enough time has passed
+                                float timeSinceLastSent = currentTime - lodState.LastSentTime;
+                                if (timeSinceLastSent < minIntervalMs)
+                                {
+                                    continue;  // Skip this buddy entirely for this update cycle
+                                }
+                            }
+
+                            if (lastSentStates.TryGetValue(stateKey, out var lastState))
+                            {
+                                // Check position threshold
+                                sendPosition = lastState.HasPositionChanged(buddyPos.X, buddyPos.Y, buddyPos.Z, posThreshold);
+
+                                // Check health based on mode
+                                if (healthMode == Config.HealthDataMode.Always)
+                                {
+                                    sendHealth = true;
+                                }
+                                else if (healthMode == Config.HealthDataMode.OnChange)
+                                {
+                                    sendHealth = lastState.HasHealthChanged(buddyHealth, buddyMaxHealth, healthThreshold)
+                                              || lastState.HasSaturationChanged(buddySat, buddyMaxSat, satThreshold);
+                                }
+                            }
+                            else
+                            {
+                                // No last state = first time seeing this buddy, send everything
+                                sendPosition = true;
+                                sendHealth = healthMode != Config.HealthDataMode.Never;
+                            }
+                        }
+
+                        // Only include buddy if something changed (or forced full sync)
+                        if (sendPosition || sendHealth)
+                        {
+                            names.Add(buddy.PlayerName);
+                            uids.Add(buddy.PlayerUID);
+                            posX.Add(buddyPos.X);
+                            posY.Add(buddyPos.Y);
+                            posZ.Add(buddyPos.Z);
+                            timestamps.Add(currentTime);
+
+                            if (sendHealth)
+                            {
+                                health.Add(buddyHealth);
+                                maxHealth.Add(buddyMaxHealth);
+                                saturation.Add(buddySat);
+                                maxSaturation.Add(buddyMaxSat);
+                            }
+                            else
+                            {
+                                // Use sentinel values to indicate "no update"
+                                health.Add(-1f);
+                                maxHealth.Add(-1f);
+                                saturation.Add(-1f);
+                                maxSaturation.Add(-1f);
+                            }
+
+                            // Update last sent state
+                            if (!lastSentStates.TryGetValue(stateKey, out var state))
+                            {
+                                state = new LastSentBuddyState();
+                                lastSentStates[stateKey] = state;
+                            }
+
+                            // Only update health/saturation baseline when we actually sent those values
+                            // Otherwise slow saturation drift never accumulates enough to trigger an update
+                            if (sendHealth)
+                            {
+                                state.Update(buddyPos.X, buddyPos.Y, buddyPos.Z, buddyHealth, buddyMaxHealth, buddySat, buddyMaxSat, currentTime);
+                            }
+                            else
+                            {
+                                state.UpdatePositionOnly(buddyPos.X, buddyPos.Y, buddyPos.Z, currentTime);
+                            }
+                        }
+                    }
+
+                    // Only send packet if there's data to send
+                    if (names.Count > 0)
+                    {
+                        var packet = new BeaconPositionPacket
+                        {
+                            PlayerNames = names.ToArray(),
+                            PlayerUids = uids.ToArray(),
+                            PosX = posX.ToArray(),
+                            PosY = posY.ToArray(),
+                            PosZ = posZ.ToArray(),
+                            Timestamps = timestamps.ToArray(),
+                            Health = health.ToArray(),
+                            MaxHealth = maxHealth.ToArray(),
+                            Saturation = saturation.ToArray(),
+                            MaxSaturation = maxSaturation.ToArray()
+                        };
+
+                        sapi.Network.GetChannel(ChannelName).SendPacket(packet, recipient);
+                    }
+
+                    // Clear full sync flag after processing
+                    if (needsFullSync)
+                    {
+                        playersNeedingFullSync.Remove(recipient.PlayerUID);
+                    }
                 }
             }
         }
@@ -1196,6 +1581,442 @@ namespace VSBuddyBeacon
 
             string chatType = packet.IsPartyChat ? "party" : "group";
             LogDebug(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} sent {chatType} message to {recipients.Count} players");
+        }
+
+        #endregion
+
+        #region Server-side Party Handlers
+
+        private void OnPartyInviteReceived(IServerPlayer fromPlayer, PartyInvitePacket packet)
+        {
+            var targetPlayer = sapi.World.AllOnlinePlayers
+                .FirstOrDefault(p => p.PlayerUID == packet.TargetPlayerUid) as IServerPlayer;
+
+            if (targetPlayer == null)
+            {
+                SendPartyInviteResult(fromPlayer, false, "Target player is not online.");
+                return;
+            }
+
+            // Check if target is silenced by the inviter
+            if (IsPlayerSilenced(targetPlayer.PlayerUID, fromPlayer.PlayerUID))
+            {
+                SendPartyInviteResult(fromPlayer, false, "That player is not accepting requests right now.");
+                return;
+            }
+
+            // Check if inviter can invite (must be leader of their party or have no party)
+            if (playerPartyMap.TryGetValue(fromPlayer.PlayerUID, out long inviterPartyId))
+            {
+                var inviterParty = parties[inviterPartyId];
+                if (inviterParty.LeaderUid != fromPlayer.PlayerUID)
+                {
+                    SendPartyInviteResult(fromPlayer, false, "Only the party leader can invite new members.");
+                    return;
+                }
+            }
+
+            // Check if target is already in a party
+            if (playerPartyMap.ContainsKey(targetPlayer.PlayerUID))
+            {
+                SendPartyInviteResult(fromPlayer, false, $"{targetPlayer.PlayerName} is already in a party.");
+                return;
+            }
+
+            // Track invite count for repeat detection
+            int inviteCount = IncrementPartyInviteCount(targetPlayer.PlayerUID, fromPlayer.PlayerUID);
+            long requestTime = sapi.World.ElapsedMilliseconds;
+
+            var invite = new PendingPartyInvite
+            {
+                InviteId = nextPartyInviteId++,
+                InviterUid = fromPlayer.PlayerUID,
+                TargetUid = targetPlayer.PlayerUID,
+                PartyId = playerPartyMap.TryGetValue(fromPlayer.PlayerUID, out long pid) ? pid : 0,
+                RequestTime = requestTime
+            };
+
+            pendingPartyInvites[invite.InviteId] = invite;
+
+            var prompt = new PartyInvitePromptPacket
+            {
+                InviterName = fromPlayer.PlayerName,
+                InviteId = invite.InviteId,
+                InviterUid = fromPlayer.PlayerUID,
+                RequestTimestamp = requestTime,
+                RequestCount = inviteCount
+            };
+
+            sapi.Network.GetChannel(ChannelName).SendPacket(prompt, targetPlayer);
+            SendPartyInviteResult(fromPlayer, true, $"Invite sent to {targetPlayer.PlayerName}. Waiting for response...");
+
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} invited {targetPlayer.PlayerName} to party (count: {inviteCount})");
+        }
+
+        private void OnPartyInviteResponseReceived(IServerPlayer fromPlayer, PartyInviteResponsePacket packet)
+        {
+            if (!pendingPartyInvites.TryGetValue(packet.InviteId, out var invite))
+            {
+                SendPartyInviteResult(fromPlayer, false, "Invite has expired.");
+                return;
+            }
+
+            if (invite.TargetUid != fromPlayer.PlayerUID)
+                return;
+
+            pendingPartyInvites.Remove(packet.InviteId);
+
+            var inviter = sapi.World.AllOnlinePlayers
+                .FirstOrDefault(p => p.PlayerUID == invite.InviterUid) as IServerPlayer;
+
+            if (inviter == null)
+            {
+                SendPartyInviteResult(fromPlayer, false, "Inviter is no longer online.");
+                return;
+            }
+
+            if (!packet.Accepted)
+            {
+                SendPartyInviteResult(inviter, false, $"{fromPlayer.PlayerName} declined your party invite.");
+                SendPartyInviteResult(fromPlayer, true, "Invite declined.");
+                return;
+            }
+
+            // Check if target joined another party while waiting
+            if (playerPartyMap.ContainsKey(fromPlayer.PlayerUID))
+            {
+                SendPartyInviteResult(inviter, false, $"{fromPlayer.PlayerName} is already in a party.");
+                SendPartyInviteResult(fromPlayer, false, "You are already in a party.");
+                return;
+            }
+
+            // Create or join party
+            Party party;
+            if (invite.PartyId != 0 && parties.TryGetValue(invite.PartyId, out party))
+            {
+                // Join existing party
+            }
+            else if (playerPartyMap.TryGetValue(inviter.PlayerUID, out long existingPartyId) && parties.TryGetValue(existingPartyId, out party))
+            {
+                // Inviter created/joined a party since invite was sent
+            }
+            else
+            {
+                // Create new party with inviter as leader
+                party = new Party
+                {
+                    PartyId = nextPartyId++,
+                    OriginalLeaderUid = inviter.PlayerUID,
+                    LeaderUid = inviter.PlayerUID,
+                    MemberUids = new List<string> { inviter.PlayerUID },
+                    MemberNames = new Dictionary<string, string> { { inviter.PlayerUID, inviter.PlayerName } },
+                    CreatedTime = sapi.World.ElapsedMilliseconds
+                };
+                parties[party.PartyId] = party;
+                playerPartyMap[inviter.PlayerUID] = party.PartyId;
+                LogInfo(sapi, $"[VSBuddyBeacon] Created new party {party.PartyId} with leader {inviter.PlayerName}");
+            }
+
+            // Add target to party
+            party.MemberUids.Add(fromPlayer.PlayerUID);
+            party.MemberNames[fromPlayer.PlayerUID] = fromPlayer.PlayerName;
+            playerPartyMap[fromPlayer.PlayerUID] = party.PartyId;
+
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} joined party {party.PartyId}");
+
+            // Mark all party members (including new joiner) for full health sync
+            // so everyone gets fresh data about the new member and vice versa
+            foreach (var memberUid in party.MemberUids)
+            {
+                playersNeedingFullSync.Add(memberUid);
+            }
+
+            // Broadcast updated party state to all members
+            BroadcastPartyState(party);
+
+            SendPartyInviteResult(inviter, true, $"{fromPlayer.PlayerName} joined your party!");
+            SendPartyInviteResult(fromPlayer, true, $"You joined {inviter.PlayerName}'s party!");
+        }
+
+        private void OnPartyLeaveReceived(IServerPlayer fromPlayer, PartyLeavePacket packet)
+        {
+            HandlePlayerLeaveParty(fromPlayer.PlayerUID, "left");
+        }
+
+        private void OnPartyKickReceived(IServerPlayer fromPlayer, PartyKickPacket packet)
+        {
+            if (!playerPartyMap.TryGetValue(fromPlayer.PlayerUID, out long partyId))
+            {
+                SendPartyInviteResult(fromPlayer, false, "You are not in a party.");
+                return;
+            }
+
+            var party = parties[partyId];
+            if (party.LeaderUid != fromPlayer.PlayerUID)
+            {
+                SendPartyInviteResult(fromPlayer, false, "Only the party leader can kick members.");
+                return;
+            }
+
+            if (!party.MemberUids.Contains(packet.TargetPlayerUid))
+            {
+                SendPartyInviteResult(fromPlayer, false, "That player is not in your party.");
+                return;
+            }
+
+            if (packet.TargetPlayerUid == fromPlayer.PlayerUID)
+            {
+                SendPartyInviteResult(fromPlayer, false, "You cannot kick yourself. Use Leave instead.");
+                return;
+            }
+
+            // Remove target from party
+            party.MemberUids.Remove(packet.TargetPlayerUid);
+            playerPartyMap.Remove(packet.TargetPlayerUid);
+
+            // Find target player and notify them
+            var targetPlayer = sapi.World.AllOnlinePlayers
+                .FirstOrDefault(p => p.PlayerUID == packet.TargetPlayerUid) as IServerPlayer;
+
+            if (targetPlayer != null)
+            {
+                sapi.Network.GetChannel(ChannelName).SendPacket(new PartyDisbandedPacket
+                {
+                    Reason = "kicked"
+                }, targetPlayer);
+            }
+
+            string targetName = targetPlayer?.PlayerName ?? "Unknown";
+            LogInfo(sapi, $"[VSBuddyBeacon] {targetName} was kicked from party {partyId} by {fromPlayer.PlayerName}");
+
+            // If only leader remains, disband the party
+            if (party.MemberUids.Count <= 1)
+            {
+                DisbandParty(party, "Party disbanded (only you remained).");
+                SendPartyInviteResult(fromPlayer, true, $"Kicked {targetName}. Party disbanded.");
+            }
+            else
+            {
+                // Broadcast updated state to remaining members
+                BroadcastPartyState(party);
+                SendPartyInviteResult(fromPlayer, true, $"Kicked {targetName} from the party.");
+            }
+        }
+
+        private void OnPartyMakeLeadReceived(IServerPlayer fromPlayer, PartyMakeLeadPacket packet)
+        {
+            if (!playerPartyMap.TryGetValue(fromPlayer.PlayerUID, out long partyId))
+            {
+                SendPartyInviteResult(fromPlayer, false, "You are not in a party.");
+                return;
+            }
+
+            var party = parties[partyId];
+            if (party.LeaderUid != fromPlayer.PlayerUID)
+            {
+                SendPartyInviteResult(fromPlayer, false, "Only the party leader can transfer leadership.");
+                return;
+            }
+
+            if (!party.MemberUids.Contains(packet.TargetPlayerUid))
+            {
+                SendPartyInviteResult(fromPlayer, false, "That player is not in your party.");
+                return;
+            }
+
+            if (packet.TargetPlayerUid == fromPlayer.PlayerUID)
+            {
+                SendPartyInviteResult(fromPlayer, false, "You are already the leader.");
+                return;
+            }
+
+            // Transfer leadership permanently (both original and current)
+            party.OriginalLeaderUid = packet.TargetPlayerUid;
+            party.LeaderUid = packet.TargetPlayerUid;
+
+            var newLeader = sapi.World.AllOnlinePlayers
+                .FirstOrDefault(p => p.PlayerUID == packet.TargetPlayerUid);
+            string newLeaderName = newLeader?.PlayerName ?? "Unknown";
+
+            LogInfo(sapi, $"[VSBuddyBeacon] {fromPlayer.PlayerName} permanently transferred party {partyId} leadership to {newLeaderName}");
+
+            // Broadcast updated state to all members
+            BroadcastPartyState(party);
+            SendPartyInviteResult(fromPlayer, true, $"Transferred leadership to {newLeaderName}.");
+        }
+
+        private void HandlePlayerLeaveParty(string playerUid, string reason)
+        {
+            if (!playerPartyMap.TryGetValue(playerUid, out long partyId))
+                return;
+
+            var party = parties[partyId];
+            party.MemberUids.Remove(playerUid);
+            playerPartyMap.Remove(playerUid);
+
+            // Find the leaving player
+            var leavingPlayer = sapi.World.AllOnlinePlayers
+                .FirstOrDefault(p => p.PlayerUID == playerUid) as IServerPlayer;
+            string leavingName = leavingPlayer?.PlayerName ?? "Unknown";
+
+            // Notify the leaving player
+            if (leavingPlayer != null && reason != "disconnected")
+            {
+                sapi.Network.GetChannel(ChannelName).SendPacket(new PartyDisbandedPacket
+                {
+                    Reason = reason
+                }, leavingPlayer);
+            }
+
+            LogInfo(sapi, $"[VSBuddyBeacon] {leavingName} left party {partyId}");
+
+            // If 0 or 1 member remains, disband the party (solo party doesn't make sense)
+            if (party.MemberUids.Count <= 1)
+            {
+                if (party.MemberUids.Count == 1)
+                {
+                    // Notify the remaining solo member that party is disbanded
+                    DisbandParty(party, "Party disbanded (other member left).");
+                }
+                else
+                {
+                    // Party empty, just clean up
+                    parties.Remove(partyId);
+                }
+                LogInfo(sapi, $"[VSBuddyBeacon] Party {partyId} dissolved");
+                return;
+            }
+
+            if (party.LeaderUid == playerUid)
+            {
+                // Transfer leadership to first remaining member
+                party.LeaderUid = party.MemberUids[0];
+                var newLeader = sapi.World.AllOnlinePlayers
+                    .FirstOrDefault(p => p.PlayerUID == party.LeaderUid);
+                string newLeaderName = newLeader?.PlayerName ?? "Unknown";
+                LogInfo(sapi, $"[VSBuddyBeacon] Party {partyId} leadership transferred to {newLeaderName} (previous leader left)");
+            }
+
+            // Notify remaining members
+            BroadcastPartyState(party);
+        }
+
+        private void DisbandParty(Party party, string reason)
+        {
+            // Notify all remaining members that the party is disbanded
+            foreach (var uid in party.MemberUids.ToList())
+            {
+                var player = sapi.World.AllOnlinePlayers
+                    .FirstOrDefault(p => p.PlayerUID == uid) as IServerPlayer;
+                if (player != null)
+                {
+                    sapi.Network.GetChannel(ChannelName).SendPacket(new PartyDisbandedPacket
+                    {
+                        Reason = reason
+                    }, player);
+                }
+                playerPartyMap.Remove(uid);
+            }
+
+            parties.Remove(party.PartyId);
+            LogInfo(sapi, $"[VSBuddyBeacon] Party {party.PartyId} disbanded: {reason}");
+        }
+
+        private void BroadcastPartyState(Party party, string disconnectingPlayerUid = null)
+        {
+            var memberNames = new List<string>();
+            var memberUids = new List<string>();
+            var memberOnline = new List<bool>();
+
+            // Include ALL members (online and offline)
+            foreach (var uid in party.MemberUids)
+            {
+                var player = sapi.World.AllOnlinePlayers.FirstOrDefault(p => p.PlayerUID == uid);
+                // Player is online if in list AND not the one currently disconnecting
+                bool isOnline = player != null && uid != disconnectingPlayerUid;
+
+                // Get name from online player or stored name
+                string name = (player != null) ? player.PlayerName :
+                    (party.MemberNames.TryGetValue(uid, out string storedName) ? storedName : "Unknown");
+
+                memberUids.Add(uid);
+                memberNames.Add(name);
+                memberOnline.Add(isOnline);
+            }
+
+            var leaderPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault(p => p.PlayerUID == party.LeaderUid);
+            string leaderName = leaderPlayer?.PlayerName ??
+                (party.MemberNames.TryGetValue(party.LeaderUid, out string storedLeaderName) ? storedLeaderName : "Unknown");
+
+            // Get original leader name
+            var originalLeaderPlayer = sapi.World.AllOnlinePlayers.FirstOrDefault(p => p.PlayerUID == party.OriginalLeaderUid);
+            string originalLeaderName = originalLeaderPlayer?.PlayerName ??
+                (party.MemberNames.TryGetValue(party.OriginalLeaderUid, out string storedOriginalName) ? storedOriginalName : "Unknown");
+
+            var statePacket = new PartyStatePacket
+            {
+                PartyId = party.PartyId,
+                LeaderUid = party.LeaderUid,
+                LeaderName = leaderName,
+                OriginalLeaderUid = party.OriginalLeaderUid,
+                OriginalLeaderName = originalLeaderName,
+                MemberUids = memberUids.ToArray(),
+                MemberNames = memberNames.ToArray(),
+                MemberOnline = memberOnline.ToArray()
+            };
+
+            // Only send to online members
+            foreach (var uid in party.MemberUids)
+            {
+                var player = sapi.World.AllOnlinePlayers.FirstOrDefault(p => p.PlayerUID == uid) as IServerPlayer;
+                if (player != null)
+                {
+                    sapi.Network.GetChannel(ChannelName).SendPacket(statePacket, player);
+                }
+            }
+        }
+
+        private int IncrementPartyInviteCount(string targetUid, string inviterUid)
+        {
+            if (!partyInviteCounts.TryGetValue(targetUid, out var counts))
+            {
+                counts = new Dictionary<string, int>();
+                partyInviteCounts[targetUid] = counts;
+            }
+
+            if (!counts.TryGetValue(inviterUid, out int count))
+                count = 0;
+
+            count++;
+            counts[inviterUid] = count;
+            return count;
+        }
+
+        private void SendPartyInviteResult(IServerPlayer player, bool success, string message)
+        {
+            sapi.Network.GetChannel(ChannelName).SendPacket(
+                new PartyInviteResultPacket { Success = success, Message = message }, player);
+        }
+
+        private void CheckPartyInviteTimeouts(float dt)
+        {
+            long now = sapi.World.ElapsedMilliseconds;
+            var expiredIds = pendingPartyInvites
+                .Where(kvp => (now - kvp.Value.RequestTime) / 1000f > REQUEST_TIMEOUT_SECONDS)
+                .Select(kvp => kvp.Key)
+                .ToList();
+
+            foreach (var id in expiredIds)
+            {
+                var invite = pendingPartyInvites[id];
+                pendingPartyInvites.Remove(id);
+
+                var inviter = sapi.World.AllOnlinePlayers
+                    .FirstOrDefault(p => p.PlayerUID == invite.InviterUid) as IServerPlayer;
+
+                if (inviter != null)
+                    SendPartyInviteResult(inviter, false, "Party invite timed out.");
+            }
         }
 
         #endregion
@@ -1569,32 +2390,55 @@ namespace VSBuddyBeacon
         {
             long clientReceiveTime = capi.World.ElapsedMilliseconds;  // Capture immediately
 
-            if (packet.PlayerNames == null || packet.PlayerNames.Length == 0)
+            // Update cache with fresh positions from packet
+            if (packet.PlayerNames != null)
             {
-                buddyCompassHud?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
-                buddyMapLayer?.UpdateBuddyPositions(new List<BuddyPositionWithTimestamp>());
-                return;
-            }
-
-            var positions = new List<BuddyPositionWithTimestamp>();
-            for (int i = 0; i < packet.PlayerNames.Length; i++)
-            {
-                long serverTimestamp = packet.Timestamps != null && i < packet.Timestamps.Length
-                    ? packet.Timestamps[i]
-                    : clientReceiveTime;  // Fallback for backward compatibility
-
-                positions.Add(new BuddyPositionWithTimestamp
+                for (int i = 0; i < packet.PlayerNames.Length; i++)
                 {
-                    Name = packet.PlayerNames[i],
-                    Position = new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i]),
-                    ServerTimestamp = serverTimestamp,
-                    ClientReceivedTime = clientReceiveTime,
-                    Health = packet.Health != null && i < packet.Health.Length ? packet.Health[i] : 0f,
-                    MaxHealth = packet.MaxHealth != null && i < packet.MaxHealth.Length ? packet.MaxHealth[i] : 15f,
-                    Saturation = packet.Saturation != null && i < packet.Saturation.Length ? packet.Saturation[i] : 0f,
-                    MaxSaturation = packet.MaxSaturation != null && i < packet.MaxSaturation.Length ? packet.MaxSaturation[i] : 1200f
-                });
+                    string name = packet.PlayerNames[i];
+                    long serverTimestamp = packet.Timestamps != null && i < packet.Timestamps.Length
+                        ? packet.Timestamps[i]
+                        : clientReceiveTime;
+
+                    // Get packet health values (-1 means "unchanged, keep previous")
+                    float packetHealth = packet.Health != null && i < packet.Health.Length ? packet.Health[i] : -1f;
+                    float packetMaxHealth = packet.MaxHealth != null && i < packet.MaxHealth.Length ? packet.MaxHealth[i] : -1f;
+                    float packetSat = packet.Saturation != null && i < packet.Saturation.Length ? packet.Saturation[i] : -1f;
+                    float packetMaxSat = packet.MaxSaturation != null && i < packet.MaxSaturation.Length ? packet.MaxSaturation[i] : -1f;
+
+                    // Check for existing cached entry to preserve health if sentinel
+                    cachedBuddyPositions.TryGetValue(name, out var existingEntry);
+
+                    var pos = new BuddyPositionWithTimestamp
+                    {
+                        Name = name,
+                        PlayerUid = packet.PlayerUids != null && i < packet.PlayerUids.Length ? packet.PlayerUids[i] : null,
+                        Position = new Vec3d(packet.PosX[i], packet.PosY[i], packet.PosZ[i]),
+                        ServerTimestamp = serverTimestamp,
+                        ClientReceivedTime = clientReceiveTime,
+                        // Use new value if provided, otherwise keep cached value, otherwise use default
+                        Health = packetHealth >= 0 ? packetHealth : (existingEntry?.Health ?? 15f),
+                        MaxHealth = packetMaxHealth >= 0 ? packetMaxHealth : (existingEntry?.MaxHealth ?? 15f),
+                        Saturation = packetSat >= 0 ? packetSat : (existingEntry?.Saturation ?? 1200f),
+                        MaxSaturation = packetMaxSat >= 0 ? packetMaxSat : (existingEntry?.MaxSaturation ?? 1200f)
+                    };
+
+                    cachedBuddyPositions[pos.Name] = pos;
+                }
             }
+
+            // Remove expired entries from cache (>60s old)
+            var expiredNames = cachedBuddyPositions
+                .Where(kvp => kvp.Value.GetStalenessLevel(clientReceiveTime) == StalenessLevel.Expired)
+                .Select(kvp => kvp.Key)
+                .ToList();
+            foreach (var name in expiredNames)
+            {
+                cachedBuddyPositions.Remove(name);
+            }
+
+            // Build combined list from cache (includes both fresh and stale entries)
+            var positions = cachedBuddyPositions.Values.ToList();
 
             buddyCompassHud?.UpdateBuddyPositions(positions);
             buddyMapLayer?.UpdateBuddyPositions(positions);
@@ -1614,6 +2458,41 @@ namespace VSBuddyBeacon
         {
             string chatType = packet.IsPartyChat ? "Party" : "Group";
             capi.ShowChatMessage($"<strong>[{chatType}] {packet.SenderName}:</strong> {packet.Message}");
+        }
+
+        private void OnPartyInvitePromptReceived(PartyInvitePromptPacket packet)
+        {
+            partyInvitePromptDialog = new GuiDialogPartyInvitePrompt(
+                capi, packet.InviterName, packet.InviteId,
+                packet.InviterUid, packet.RequestTimestamp, packet.RequestCount);
+            partyInvitePromptDialog.TryOpen();
+        }
+
+        private void OnPartyStateReceived(PartyStatePacket packet)
+        {
+            currentPartyState = packet;
+            partyListHud?.UpdatePartyState(packet);
+        }
+
+        private void OnPartyDisbandedReceived(PartyDisbandedPacket packet)
+        {
+            currentPartyState = null;
+            partyListHud?.ClearPartyState();
+
+            string message = packet.Reason switch
+            {
+                "kicked" => "You were kicked from the party.",
+                "left" => "You left the party.",
+                "leader_left" => "The party leader left. Party disbanded.",
+                "disbanded" => "The party was disbanded.",
+                _ => "You are no longer in a party."
+            };
+            capi.ShowChatMessage($"[BuddyBeacon] {message}");
+        }
+
+        private void OnPartyInviteResultReceived(PartyInviteResultPacket packet)
+        {
+            capi.ShowChatMessage($"[BuddyBeacon] {packet.Message}");
         }
 
         #endregion
@@ -1682,6 +2561,88 @@ namespace VSBuddyBeacon
             });
         }
 
+        // Party API methods
+
+        public void SendPartyInvite(string targetUid)
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new PartyInvitePacket
+            {
+                TargetPlayerUid = targetUid
+            });
+        }
+
+        public void SendPartyInviteResponse(long inviteId, bool accepted)
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new PartyInviteResponsePacket
+            {
+                InviteId = inviteId,
+                Accepted = accepted
+            });
+        }
+
+        private void AddFakePartyMember(string name, string uid)
+        {
+            if (capi?.World?.Player?.Entity?.Pos == null) return;
+
+            fakePartyMemberName = name;
+            fakePartyMemberUid = uid;
+
+            // Register a tick handler to keep updating the fake buddy
+            capi.Event.RegisterGameTickListener(UpdateFakePartyMember, 1000);
+        }
+
+        private void UpdateFakePartyMember(float dt)
+        {
+            if (!partyTestMode || capi?.World?.Player?.Entity?.Pos == null || string.IsNullOrEmpty(fakePartyMemberName))
+            {
+                return;
+            }
+
+            // Use combined update to include .buddyfake buddies if active
+            UpdateAllFakeBuddies();
+        }
+
+        public void SendPartyLeave()
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new PartyLeavePacket());
+        }
+
+        public void SendPartyKick(string targetUid)
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new PartyKickPacket
+            {
+                TargetPlayerUid = targetUid
+            });
+        }
+
+        public void SendPartyMakeLead(string targetUid)
+        {
+            capi?.Network.GetChannel(ChannelName).SendPacket(new PartyMakeLeadPacket
+            {
+                TargetPlayerUid = targetUid
+            });
+        }
+
+        public PartyStatePacket GetCurrentPartyState() => currentPartyState;
+
+        public bool IsPartyLeader()
+        {
+            if (currentPartyState == null || capi?.World?.Player == null)
+                return false;
+            return currentPartyState.LeaderUid == capi.World.Player.PlayerUID;
+        }
+
+        public bool IsInParty() => currentPartyState != null;
+
+        public string GetPartyMemberUid(string playerName)
+        {
+            if (currentPartyState == null) return null;
+            int index = Array.IndexOf(currentPartyState.MemberNames, playerName);
+            if (index >= 0 && index < currentPartyState.MemberUids.Length)
+                return currentPartyState.MemberUids[index];
+            return null;
+        }
+
         #endregion
     }
 
@@ -1692,5 +2653,73 @@ namespace VSBuddyBeacon
         public string TargetUid { get; set; }
         public TeleportRequestType RequestType { get; set; }
         public long RequestTime { get; set; }
+    }
+
+    /// <summary>
+    /// Tracks last-sent buddy state for delta compression
+    /// </summary>
+    public class LastSentBuddyState
+    {
+        public double PosX { get; set; }
+        public double PosY { get; set; }
+        public double PosZ { get; set; }
+        public float Health { get; set; }
+        public float MaxHealth { get; set; }
+        public float Saturation { get; set; }
+        public float MaxSaturation { get; set; }
+        public long LastSentTime { get; set; }
+
+        /// <summary>
+        /// Check if position has changed beyond threshold
+        /// </summary>
+        public bool HasPositionChanged(double x, double y, double z, float threshold)
+        {
+            if (threshold <= 0) return true;  // Always send if threshold is 0
+            double dx = x - PosX;
+            double dy = y - PosY;
+            double dz = z - PosZ;
+            double distSq = dx * dx + dy * dy + dz * dz;
+            return distSq >= threshold * threshold;
+        }
+
+        /// <summary>
+        /// Check if health has changed beyond threshold
+        /// </summary>
+        public bool HasHealthChanged(float health, float maxHealth, float threshold)
+        {
+            return Math.Abs(health - Health) >= threshold || Math.Abs(maxHealth - MaxHealth) >= 0.1f;
+        }
+
+        /// <summary>
+        /// Check if saturation has changed beyond threshold
+        /// </summary>
+        public bool HasSaturationChanged(float saturation, float maxSaturation, float threshold)
+        {
+            return Math.Abs(saturation - Saturation) >= threshold || Math.Abs(maxSaturation - MaxSaturation) >= 0.1f;
+        }
+
+        public void Update(double x, double y, double z, float health, float maxHealth, float saturation, float maxSaturation, long time)
+        {
+            PosX = x;
+            PosY = y;
+            PosZ = z;
+            Health = health;
+            MaxHealth = maxHealth;
+            Saturation = saturation;
+            MaxSaturation = maxSaturation;
+            LastSentTime = time;
+        }
+
+        /// <summary>
+        /// Update only position and time - use when health/saturation wasn't sent
+        /// to avoid resetting the change detection baseline for those values
+        /// </summary>
+        public void UpdatePositionOnly(double x, double y, double z, long time)
+        {
+            PosX = x;
+            PosY = y;
+            PosZ = z;
+            LastSentTime = time;
+        }
     }
 }
