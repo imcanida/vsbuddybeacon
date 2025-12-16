@@ -5,7 +5,15 @@
       "WebSearch",
       "WebFetch(domain:wiki.vintagestory.at)",
       "WebFetch(domain:apidocs.vintagestory.at)",
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "Bash(cat:*)",
+      "Bash(dir /B /O-D \"C:\\Users\\imcanida\\AppData\\Roaming\\VintagestoryData\\Logs\")",
+      "WebFetch(domain:www.vintagestory.at)",
+      "WebFetch(domain:api.github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:mods.vintagestory.at)",
+      "Bash(ren:*)",
+      "Bash(mv:*)"
     ],
     "deny": [],
     "ask": []
