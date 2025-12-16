@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Cairo;
 using Vintagestory.API.Client;
 using Vintagestory.API.Config;
@@ -8,24 +9,32 @@ namespace VSBuddyBeacon.GUI
     public class GuiDialogSlotMenu : GuiDialog
     {
         private string playerName;
+        private string playerUid;
         private int currentColorIndex;
-        private Action<string, string> onAction;  // (playerName, action)
+        private Action<string, string, string> onAction;  // (playerName, playerUid, action)
         private double posX;
         private double posY;
+        private bool isLeader;
+        private bool isSelf;
+        private int playerIndex;
+        private int totalCount;
 
         public override string ToggleKeyCombinationCode => null;
         public override bool PrefersUngrabbedMouse => true;
 
-        public GuiDialogSlotMenu(ICoreClientAPI capi, string playerName, int colorIndex, double x, double y, Action<string, string> onAction) : base(capi)
+        public GuiDialogSlotMenu(ICoreClientAPI capi, string playerName, string playerUid, int colorIndex, double x, double y, bool isLeader, bool isSelf, int playerIndex, int totalCount, Action<string, string, string> onAction) : base(capi)
         {
-            capi.Logger.Debug($"[VSBuddyBeacon] GuiDialogSlotMenu constructor for {playerName}");
             this.playerName = playerName;
+            this.playerUid = playerUid;
             this.currentColorIndex = colorIndex;
             this.onAction = onAction;
             this.posX = x;
             this.posY = y;
+            this.isLeader = isLeader;
+            this.isSelf = isSelf;
+            this.playerIndex = playerIndex;
+            this.totalCount = totalCount;
             ComposeDialog();
-            capi.Logger.Debug($"[VSBuddyBeacon] GuiDialogSlotMenu composed, SingleComposer null? {SingleComposer == null}");
         }
 
         private void ComposeDialog()
@@ -33,7 +42,40 @@ namespace VSBuddyBeacon.GUI
             int menuWidth = 120;
             int buttonHeight = 24;
             int padding = 6;
-            int menuHeight = padding * 2 + buttonHeight * 4 + 3 * 4; // 4 buttons + 3 gaps
+            int gap = 4;
+
+            // Determine which buttons to show based on permissions
+            var buttons = new List<(string label, string action)>();
+
+            // Always show color change
+            buttons.Add(("Change Color", "changecolor"));
+
+            // Move up - only if not at top and more than 1 member
+            if (totalCount > 1 && playerIndex > 0)
+            {
+                buttons.Add(("Move Up", "moveup"));
+            }
+
+            // Move down - only if not at bottom and more than 1 member
+            if (totalCount > 1 && playerIndex < totalCount - 1)
+            {
+                buttons.Add(("Move Down", "movedown"));
+            }
+
+            // Leader-only actions for other players
+            if (isLeader && !isSelf)
+            {
+                buttons.Add(("Kick", "kick"));
+                buttons.Add(("Make Lead", "makelead"));
+            }
+
+            // Leave option - everyone can leave (for self)
+            if (isSelf)
+            {
+                buttons.Add(("Leave Party", "leave"));
+            }
+
+            int menuHeight = padding * 2 + buttonHeight * buttons.Count + gap * (buttons.Count - 1);
 
             // Convert screen coordinates to GUI scale
             double guiScale = RuntimeEnv.GUIScale;
@@ -53,7 +95,7 @@ namespace VSBuddyBeacon.GUI
 
             double y = padding;
 
-            SingleComposer = capi.Gui.CreateCompo("slotmenu-" + playerName, dialogBounds)
+            var composer = capi.Gui.CreateCompo("slotmenu-" + playerName, dialogBounds)
                 .AddStaticCustomDraw(bgBounds, (ctx, surface, bounds) => {
                     // Draw solid dark background
                     ctx.SetSourceRGBA(0.1, 0.1, 0.1, 0.95);
@@ -65,22 +107,22 @@ namespace VSBuddyBeacon.GUI
                     ctx.Rectangle(0.5, 0.5, bounds.OuterWidth - 1, bounds.OuterHeight - 1);
                     ctx.Stroke();
                 })
-                .BeginChildElements(bgBounds)
-                    .AddSmallButton("Change Color", () => { OnAction("changecolor"); return true; },
-                        ElementBounds.Fixed(padding, y, menuWidth - padding * 2, buttonHeight), EnumButtonStyle.Small)
-                    .AddSmallButton("Move Up", () => { OnAction("moveup"); return true; },
-                        ElementBounds.Fixed(padding, y += buttonHeight + 4, menuWidth - padding * 2, buttonHeight), EnumButtonStyle.Small)
-                    .AddSmallButton("Move Down", () => { OnAction("movedown"); return true; },
-                        ElementBounds.Fixed(padding, y += buttonHeight + 4, menuWidth - padding * 2, buttonHeight), EnumButtonStyle.Small)
-                    .AddSmallButton("Kick", () => { OnAction("kick"); return true; },
-                        ElementBounds.Fixed(padding, y += buttonHeight + 4, menuWidth - padding * 2, buttonHeight), EnumButtonStyle.Small)
-                .EndChildElements()
-                .Compose();
+                .BeginChildElements(bgBounds);
+
+            foreach (var (label, action) in buttons)
+            {
+                string actionCopy = action;  // Capture for closure
+                composer.AddSmallButton(label, () => { OnAction(actionCopy); return true; },
+                    ElementBounds.Fixed(padding, y, menuWidth - padding * 2, buttonHeight), EnumButtonStyle.Small);
+                y += buttonHeight + gap;
+            }
+
+            SingleComposer = composer.EndChildElements().Compose();
         }
 
         private void OnAction(string action)
         {
-            onAction?.Invoke(playerName, action);
+            onAction?.Invoke(playerName, playerUid, action);
             TryClose();
         }
 
